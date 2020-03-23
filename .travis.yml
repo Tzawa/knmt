@@ -1,12 +1,64 @@
-dist: trusty
+version: ~> 1.0
+
 language: python
+dist: xenial
+
 python:
-  - "2.7"
   - "3.6"
+  - "3.7"
+  - "3.8"
+
+#dist: trusty
+# matrix:
+#   exclude:
+#     - python: "3.8"
+#       dist: trusty
+
+#     - python: "3.7"
+#       dist: trusty
+
+#     - python: "3.6"
+#       dist: xenial
+
+#     - python: "3.6"
+#       dist: bionic
+  
+#   include:
+#     - dist: trusty
+#       language: python
+#       python: 3.6
+#       env:
+#         - TEST_SUITE: tests/suite1
+#         - TEST_SUITE: tests/suite2
+
+#     - dist: xenial
+#       language: python
+#       python: 3.7
+#       env:
+#         - TEST_SUITE: tests/suite1
+#         - TEST_SUITE: tests/suite2
+# #    - dist: xenial
+# #      python: 3.8
+
+# #    - dist: bionic
+# #      python: 3.8
+
+#     - dist: bionic
+#       language: python
+#       python: 3.8
+#       env:
+#         - TEST_SUITE: tests/suite1
+#         - TEST_SUITE: tests/suite2
+#python:
+#  - "2.7"
+#  - "3.6"
+#  - "3.7"
+#  - "3.8"
 # command to install dependencies
+
 env:
-  - TEST_SUITE: tests/suite1
-  - TEST_SUITE: tests/suite2
+    - "TEST_SUITE": "tests/suite1"
+    - "TEST_SUITE": "tests/suite2"
 install:
   - pip install .
   - pip install psutil

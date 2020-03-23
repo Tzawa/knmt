@@ -1,6 +1,25 @@
 #!/usr/bin/env python
 """eval.py: Use a RNNSearch Model"""
-from __future__ import absolute_import, division, print_function, unicode_literals
+from __future__ import (absolute_import, division, print_function,
+                        unicode_literals)
+
+import io
+import logging
+import math
+import operator
+from typing import List, Optional
+
+import chainer
+import numpy as np
+import six
+import tqdm
+
+from nmt_chainer.utilities.utils import (compute_bleu_with_unk_as_wrong,
+                                         de_batch, make_batch_src,
+                                         make_batch_src_tgt,
+                                         minibatch_provider)
+
+from . import beam_search
 
 __author__ = "Fabien Cromieres"
 __license__ = "undecided"
@@ -8,15 +27,6 @@ __version__ = "1.0"
 __email__ = "fabien.cromieres@gmail.com"
 __status__ = "Development"
 
-from nmt_chainer.utilities.utils import make_batch_src, make_batch_src_tgt, minibatch_provider, compute_bleu_with_unk_as_wrong, de_batch
-import logging
-import numpy as np
-import math
-import io
-import six
-import operator
-from . import beam_search
-import chainer
 # import h5py
 
 logging.basicConfig()
@@ -27,12 +37,13 @@ log.setLevel(logging.INFO)
 def translate_to_file(encdec, eos_idx, test_src_data, mb_size, tgt_indexer,
                       translations_fn, test_references=None, control_src_fn=None, src_indexer=None, gpu=None, nb_steps=50,
                       reverse_src=False, reverse_tgt=False,
-                      s_unk_tag="#S_UNK#", t_unk_tag="#T_UNK#"):
+                      s_unk_tag="#S_UNK#", t_unk_tag="#T_UNK#",
+                      use_chainerx=False):
 
     log.info("computing translations")
     translations = greedy_batch_translate(encdec, eos_idx, test_src_data,
                                           batch_size=mb_size, gpu=gpu, nb_steps=nb_steps,
-                                          reverse_src=reverse_src, reverse_tgt=reverse_tgt)
+                                          reverse_src=reverse_src, reverse_tgt=reverse_tgt, use_chainerx=use_chainerx)
 
     log.info("writing translation of set to %s" % translations_fn)
     out = io.open(translations_fn, "wt", encoding="utf8")
@@ -61,7 +72,8 @@ def translate_to_file(encdec, eos_idx, test_src_data, mb_size, tgt_indexer,
         return None
 
 
-def compute_loss_all(encdec, test_data, eos_idx, mb_size, gpu=None, reverse_src=False, reverse_tgt=False):
+def compute_loss_all(encdec, test_data, eos_idx, mb_size, gpu=None, reverse_src=False, reverse_tgt=False,
+                        use_chainerx=False):
     with chainer.using_config("train", False), chainer.no_backprop_mode():
         if encdec.encdec_type() == "ff":
             assert not reverse_src and not reverse_tgt
@@ -69,7 +81,7 @@ def compute_loss_all(encdec, test_data, eos_idx, mb_size, gpu=None, reverse_src=
         
         mb_provider_test = minibatch_provider(test_data, eos_idx, mb_size, nb_mb_for_sorting=-1, loop=False,
                                               gpu=gpu,
-                                              reverse_src=reverse_src, reverse_tgt=reverse_tgt)
+                                              reverse_src=reverse_src, reverse_tgt=reverse_tgt, use_chainerx=use_chainerx)
         test_loss = 0
         test_nb_predictions = 0
         for src_batch, tgt_batch, src_mask in mb_provider_test:
@@ -81,7 +93,7 @@ def compute_loss_all(encdec, test_data, eos_idx, mb_size, gpu=None, reverse_src=
 
 
 def greedy_batch_translate(encdec, eos_idx, src_data, batch_size=80, gpu=None, get_attention=False, nb_steps=50,
-                           reverse_src=False, reverse_tgt=False):
+                           reverse_src=False, reverse_tgt=False, use_chainerx=False):
     with chainer.using_config("train", False), chainer.no_backprop_mode():
         if encdec.encdec_type() == "ff":
             result = encdec.greedy_batch_translate(src_data,  mb_size=batch_size, nb_steps=nb_steps)
@@ -106,7 +118,7 @@ def greedy_batch_translate(encdec, eos_idx, src_data, batch_size=80, gpu=None, g
                     current_batch_raw_data_new.append(src_side[::-1])
                 current_batch_raw_data = current_batch_raw_data_new
     
-            src_batch, src_mask = make_batch_src(current_batch_raw_data, gpu=gpu)
+            src_batch, src_mask = make_batch_src(current_batch_raw_data, gpu=gpu, use_chainerx=use_chainerx)
             sample_greedy, score, attn_list = encdec(src_batch, nb_steps, src_mask, use_best_for_sample=True,
                                                      keep_attn_values=get_attention)
             deb = de_batch(sample_greedy, mask=None, eos_idx=eos_idx, is_variable=False)
@@ -133,7 +145,7 @@ def greedy_batch_translate(encdec, eos_idx, src_data, batch_size=80, gpu=None, g
             return res
 
 
-def reverse_rescore(encdec, src_batch, src_mask, eos_idx, translations, gpu=None):
+def reverse_rescore(encdec, src_batch, src_mask, eos_idx, translations, gpu=None, use_chainerx=False):
     with chainer.using_config("train", False), chainer.no_backprop_mode():
         from nmt_chainer.utilities import utils
     
@@ -145,7 +157,7 @@ def reverse_rescore(encdec, src_batch, src_mask, eos_idx, translations, gpu=None
     
         scorer = encdec.nbest_scorer(src_batch, src_mask)
         tgt_batch, arg_sort = utils.make_batch_tgt(reversed_translations,
-                                                   eos_idx=eos_idx, gpu=gpu, need_arg_sort=True)
+                                                   eos_idx=eos_idx, gpu=gpu, need_arg_sort=True, use_chainerx=use_chainerx)
     
         scores, attn = scorer(tgt_batch)
         scores, _ = scores
@@ -159,17 +171,34 @@ def reverse_rescore(encdec, src_batch, src_mask, eos_idx, translations, gpu=None
         return de_sorted_scores
 
 
-def beam_search_translate(encdec, eos_idx, src_data, beam_width=20, beam_pruning_margin=None, nb_steps=50, gpu=None,
-                          beam_score_coverage_penalty=None, beam_score_coverage_penalty_strength=0.2,
-                          need_attention=False, nb_steps_ratio=None, beam_score_length_normalization='none', beam_score_length_normalization_strength=0.2, post_score_length_normalization='simple', post_score_length_normalization_strength=0.2,
+def beam_search_translate(encdec, eos_idx, src_data, 
+                          beam_search_params:beam_search.BeamSearchParams = beam_search.BeamSearchParams(),
+                          #beam_width=20, beam_pruning_margin=None, 
+                          nb_steps=50, gpu=None,
+                          
+                          #beam_score_coverage_penalty=None, beam_score_coverage_penalty_strength=0.2,
+                          need_attention=False, nb_steps_ratio=None, 
+                          #beam_score_length_normalization='none', beam_score_length_normalization_strength=0.2, 
+                          
+                          post_score_length_normalization='simple', post_score_length_normalization_strength=0.2,
                           post_score_coverage_penalty='none', post_score_coverage_penalty_strength=0.2,
-                          groundhog=False, force_finish=False,
+                          groundhog=False, 
+                          #force_finish=False,
                           prob_space_combination=False,
-                          reverse_encdec=None, use_unfinished_translation_if_none_found=False,
-                          nbest=None):
+                          reverse_encdec=None, 
+                          #use_unfinished_translation_if_none_found=False,
+                          nbest=None,
+                          constraints_fn_list:Optional[List[beam_search.BeamSearchConstraints]]=None,
+                          use_astar=False,
+                          astar_params:beam_search.AStarParams=beam_search.AStarParams(),
+                          use_chainerx=False):
     nb_ex = len(src_data)
-    for num_ex in six.moves.range(nb_ex):
-        src_batch, src_mask = make_batch_src([src_data[num_ex]], gpu=gpu)
+
+    assert constraints_fn_list is None or len(constraints_fn_list) == nb_ex
+
+    for num_ex in tqdm.trange(nb_ex):
+        src_batch, src_mask = make_batch_src([src_data[num_ex]], gpu=gpu, use_chainerx=use_chainerx)
+
         assert len(src_mask) == 0
         if nb_steps_ratio is not None:
             nb_steps = int(len(src_data[num_ex]) * nb_steps_ratio) + 1
@@ -185,16 +214,27 @@ def beam_search_translate(encdec, eos_idx, src_data, beam_width=20, beam_pruning
 
         if not isinstance(encdec, (tuple, list)):
             encdec = [encdec]
+
+        if constraints_fn_list is not None:
+            constraints_fn = constraints_fn_list[num_ex].get("ph_constraint", None)
+        else:
+            constraints_fn = None
         translations = beam_search.ensemble_beam_search(encdec, src_batch, src_mask, nb_steps=nb_steps, eos_idx=eos_idx,
-                                                        beam_width=beam_width,
-                                                        beam_pruning_margin=beam_pruning_margin,
-                                                        beam_score_length_normalization=beam_score_length_normalization,
-                                                        beam_score_length_normalization_strength=beam_score_length_normalization_strength,
-                                                        beam_score_coverage_penalty=beam_score_coverage_penalty,
-                                                        beam_score_coverage_penalty_strength=beam_score_coverage_penalty_strength,
-                                                        need_attention=need_attention, force_finish=force_finish,
+                                                        beam_search_params = beam_search_params,
+                                                        #beam_width=beam_width,
+                                                        #beam_pruning_margin=beam_pruning_margin,
+                                                        #beam_score_length_normalization=beam_score_length_normalization,
+                                                        #beam_score_length_normalization_strength=beam_score_length_normalization_strength,
+                                                        #beam_score_coverage_penalty=beam_score_coverage_penalty,
+                                                        #beam_score_coverage_penalty_strength=beam_score_coverage_penalty_strength,
+                                                        need_attention=need_attention, 
+                                                        #force_finish=force_finish,
                                                         prob_space_combination=prob_space_combination,
-                                                        use_unfinished_translation_if_none_found=use_unfinished_translation_if_none_found)
+                                                        #use_unfinished_translation_if_none_found=use_unfinished_translation_if_none_found,
+                                                        constraints=constraints_fn,
+                                                        use_astar=use_astar,
+                                                        astar_params=astar_params,
+                                                        gpu=gpu)
 
         # TODO: This is a quick patch, but actually ensemble_beam_search probably should not return empty translations except when no translation found
         if len(translations) > 1:
@@ -207,7 +247,7 @@ def beam_search_translate(encdec, eos_idx, src_data, beam_width=20, beam_pruning
             rescored_translations = []
             reverse_scores = reverse_rescore(
                 reverse_encdec, src_batch, src_mask, eos_idx, [
-                    t[0] for t in translations], gpu)
+                    t[0] for t in translations], gpu, use_chainerx=use_chainerx)
             for num_t in six.moves.range(len(translations)):
                 tr, sc, attn = translations[num_t]
                 rescored_translations.append(
@@ -219,12 +259,20 @@ def beam_search_translate(encdec, eos_idx, src_data, beam_width=20, beam_pruning
         if post_score_length_normalization == 'none' and post_score_coverage_penalty == 'none':
             ranking_criterion = operator.itemgetter(1)
         else:
+            ONE_ON_DEVICE = beam_search.convert_array_if_needed(np.array(1.0, dtype=np.float32), xp, gpu)
             def ranking_criterion(x):
                 length_normalization = 1
                 if post_score_length_normalization == 'simple':
                     length_normalization = len(x[0]) + 1
                 elif post_score_length_normalization == 'google':
                     length_normalization = pow((len(x[0]) + 5), post_score_length_normalization_strength) / pow(6, post_score_length_normalization_strength)
+
+                dic_score = 0
+                dic_score_computer = (constraints_fn_list[num_ex].get("dic_constraint", None) 
+                            if constraints_fn_list is not None else None)
+                if dic_score_computer is not None:
+                    dic_score = dic_score_computer(x[0])
+                    
 
                 coverage_penalty = 0
                 if post_score_coverage_penalty == 'google':
@@ -233,7 +281,7 @@ def beam_search_translate(encdec, eos_idx, src_data, beam_width=20, beam_pruning
                     # log.info("sum={0}".format(sum(x[2])))
                     # log.info("min={0}".format(xp.minimum(sum(x[2]), xp.array(1.0))))
                     # log.info("log={0}".format(xp.log(xp.minimum(sum(x[2]), xp.array(1.0)))))
-                    log_of_min_of_sum_over_j = xp.log(xp.minimum(sum(x[2]), xp.array(1.0)))
+                    log_of_min_of_sum_over_j = xp.log(xp.minimum(sum(x[2]), ONE_ON_DEVICE))
                     coverage_penalty = post_score_coverage_penalty_strength * xp.sum(log_of_min_of_sum_over_j)
                     # log.info("cp={0}".format(coverage_penalty))
                     # cp = 0
@@ -257,7 +305,7 @@ def beam_search_translate(encdec, eos_idx, src_data, beam_width=20, beam_pruning
                     #    test = ''
                     # log.info("score slow <=> optimized: {0} <=> {1} {2}".format(slow, opti, test))
 
-                return x[1] / length_normalization + coverage_penalty
+                return x[1] / length_normalization + coverage_penalty + dic_score
 
         translations.sort(key=ranking_criterion, reverse=True)
 
@@ -267,7 +315,7 @@ def beam_search_translate(encdec, eos_idx, src_data, beam_width=20, beam_pruning
             yield [translations[0]]
 
 
-def batch_align(encdec, eos_idx, src_tgt_data, batch_size=80, gpu=None):
+def batch_align(encdec, eos_idx, src_tgt_data, batch_size=80, gpu=None, use_chainerx=False):
     nb_ex = len(src_tgt_data)
     nb_batch = nb_ex // batch_size + (1 if nb_ex % batch_size != 0 else 0)
     sum_loss = 0
@@ -276,7 +324,7 @@ def batch_align(encdec, eos_idx, src_tgt_data, batch_size=80, gpu=None):
         current_batch_raw_data = src_tgt_data[i * batch_size: (i + 1) * batch_size]
 #         print(current_batch_raw_data)
         src_batch, tgt_batch, src_mask, arg_sort = make_batch_src_tgt(
-            current_batch_raw_data, eos_idx=eos_idx, gpu=gpu, need_arg_sort=True)
+            current_batch_raw_data, eos_idx=eos_idx, gpu=gpu, need_arg_sort=True, use_chainerx = use_chainerx)
         loss, attn_list = encdec(src_batch, tgt_batch, src_mask, keep_attn_values=True)
         deb_attn = de_batch(attn_list, mask=None, eos_idx=None, is_variable=True, raw=True)
 

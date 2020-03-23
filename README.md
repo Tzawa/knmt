@@ -17,9 +17,9 @@ This code was used for participation in several shared translation tasks and cou
 #Requirements and Installation:
 
 The following is currently required for running Kyoto-NMT:
-* Python 2.7.x
-* A recent version of `chainer` (>=3.0). 
-* If using a GPU (recommended): a recent version of `cupy` (>=2.0)
+* Python >=3.6
+* A recent version of `chainer` (>=7.0). 
+* If using a GPU (recommended): a recent version of `cupy` (>=7.0)
 * The plotting libraries `plotly` and `bokeh` are used in some visualisation scripts
 
 There is now a PyPI repository, so you can install with:
@@ -138,6 +138,9 @@ In general, the translation process may generate some tags `T_UNK_X`, where `X` 
 `knmt utils` is a subcommand of `knmt` that contains sub-subcommands (yes, sub-subcommands are a bit unusual) giving access to some utility scripts. The command `knmt utils replace_tgt_unk` is provided to do this `UNK` tag replacement automatically. It expects a dictionnary in JSON format associating source language words to their translation. After having generated the translation `translation.txt` of input file `input.txt` using the `knmt eval` command, one can generate a file `translation.no_unk.txt` in which `UNK` tags have been replaced with the following command:
 
       knmt utils replace_tgt_unk translation.txt input.txt translation.no_unk.txt --dic dictionary.json
+
+### Placeholders special processing
+One might want to translate a sentence with "placeholders". E.g. Translate a sentence like "We bought <K-00> tons of coal". In order to force the decoder to output one-to-one translations of such placeholders, one can use the "--force_placeholders" option. When using the option "--force_placeholders", tokens in the vocabulary of the form "<K-00>", "<K-01>", ... will be detected as placeholders. Then the decoder will try its best to output a translation in which each placeholder in the input has exactly one corresponding placeholder in the output. Note however that the model should still have been trained to translate these placeholders correctly. The "--force_placeholders" only put additional constraints on the decoder but will not work if the model assign very low probabilities to placeholders.
 
 ## Using GPUs
 

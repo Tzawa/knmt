@@ -18,9 +18,25 @@ try:
 except ImportError:
     argcomplete = None
 
+try:
+    import ipdb as pdb
+except ImportError:
+    import pdb
+
+def run_in_ipdb(func, args):
+    import ipdb
+    with ipdb.launch_ipdb_on_exception():
+        func(args)
 
 def run_in_pdb(func, args):
+    def debug_signal_handler(signal, frame):
+        import pdb
+        pdb.set_trace()
+    import signal
+    signal.signal(signal.SIGINT, debug_signal_handler)
+
     import pdb as pdb_module
+
     import sys
     import traceback
     pdb = pdb_module.Pdb()
@@ -57,6 +73,8 @@ def main(arguments=None):
 
     parser.add_argument("--run_in_pdb", default=False, action="store_true", help="run knmt in pdb (python debugger)")
 
+    parser.add_argument("--run_in_cprofile", default=False, action="store_true", help="run knmt in cProfile")
+
     subparsers = parser.add_subparsers(dest="__subcommand_name")
 
     # create the parser for the "make_data" command
@@ -87,6 +105,10 @@ def main(arguments=None):
     else:
         args.__original_argument_list = sys.argv
 
+    if args.__subcommand_name is None:
+        parser.print_help()
+        sys.exit(1)
+
     func = {"make_data": make_data.do_make_data,
             "train": train.do_train,
             "eval": eval_module.do_eval,
@@ -94,9 +116,23 @@ def main(arguments=None):
             "utils": utils_command.do_utils}[args.__subcommand_name]
 
     if args.run_in_pdb:
-        run_in_pdb(func, args)
-#         import pdb
-#         pdb.runcall(func, args)
+        try:
+            import ipdb
+            run_in_ipdb(func, args)
+        except ImportError:
+            run_in_pdb(func, args)
+        # import pdb
+        # pdb.runcall(func, args)
+        # def debug_signal_handler(signal, frame):
+        #     import pdb
+        #     pdb.set_trace()
+        # import signal
+        # signal.signal(signal.SIGINT, debug_signal_handler)
+
+    elif args.run_in_cprofile:
+        import cProfile
+        cProfile.runctx("func(args)", globals(), locals(), sort="cumtime")
+    
     else:
         try:
             func(args)

@@ -29,10 +29,13 @@ import xml.etree.ElementTree as ET
 import re
 import subprocess
 import bokeh.embed
+import pipes
 
 logging.basicConfig()
 log = logging.getLogger("rnns:server")
 log.setLevel(logging.INFO)
+
+from .eval import placeholder_constraints_builder
 
 class Translator(object):
 
@@ -43,6 +46,15 @@ class Translator(object):
             config_server)
 
         self.encdec_list = [self.encdec]
+
+        if config_server.process.force_placeholders:
+            self.make_constraints = {"ph_constraint": placeholder_constraints_builder(self.src_indexer, self.tgt_indexer, 
+                    units_placeholders=config_server.process.units_placeholders)}
+        else:
+            self.make_constraints = None
+
+        self.always_consider_eos_and_placeholders = config_server.method.always_consider_eos_and_placeholders
+        self.use_chainerx = config_server.process.use_chainerx
 
     def translate(self, sentence, beam_width, beam_pruning_margin, beam_score_coverage_penalty, beam_score_coverage_penalty_strength, nb_steps, nb_steps_ratio,
                   remove_unk, normalize_unicode_unk, attempt_to_relocate_unk_source, beam_score_length_normalization, beam_score_length_normalization_strength, post_score_length_normalization, post_score_length_normalization_strength,
@@ -66,16 +78,36 @@ class Translator(object):
             div = '<div/>'
             unk_mapping = []
 
-            src_data, stats_src_pp = build_dataset_one_side_pp(src_file.name, self.src_indexer, max_nb_ex=self.config_server.process.max_nb_ex)
+            #src_data, stats_src_pp = build_dataset_one_side_pp(src_file.name, self.src_indexer, max_nb_ex=self.config_server.process.max_nb_ex)
+
+
+            preprocessed_input = build_dataset_one_side_pp(src_file.name, self.src_indexer, max_nb_ex=self.config_server.process.max_nb_ex,
+                                                           make_constraints_dict=self.make_constraints)
+
+            if self.make_constraints is not None:
+                src_data, stats_src_pp, constraints_list = preprocessed_input
+            else:
+                src_data, stats_src_pp = preprocessed_input
+                constraints_list = None      
 
             from nmt_chainer.translation.eval import translate_to_file_with_beam_search
-            translate_to_file_with_beam_search(dest_file.name, self.config_server.process.gpu, self.encdec, self.eos_idx, src_data, beam_width, beam_pruning_margin,
+            from nmt_chainer.translation.beam_search import BeamSearchParams
+
+            beam_search_params = BeamSearchParams(                
+                                               beam_width=beam_width, 
+                                               beam_pruning_margin=beam_pruning_margin,                        
                                                beam_score_coverage_penalty=beam_score_coverage_penalty,
                                                beam_score_coverage_penalty_strength=beam_score_coverage_penalty_strength,
-                                               nb_steps=nb_steps,
-                                               nb_steps_ratio=nb_steps_ratio,
                                                beam_score_length_normalization=beam_score_length_normalization,
                                                beam_score_length_normalization_strength=beam_score_length_normalization_strength,
+                                               force_finish=force_finish,
+                                               use_unfinished_translation_if_none_found=True,
+                                               always_consider_eos_and_placeholders=self.always_consider_eos_and_placeholders)
+
+            translate_to_file_with_beam_search(dest_file.name, self.config_server.process.gpu, self.encdec, self.eos_idx, src_data, 
+                                               beam_search_params,
+                                               nb_steps=nb_steps,
+                                               nb_steps_ratio=nb_steps_ratio,
                                                post_score_length_normalization=post_score_length_normalization,
                                                post_score_length_normalization_strength=post_score_length_normalization_strength,
                                                post_score_coverage_penalty=post_score_coverage_penalty,
@@ -83,15 +115,16 @@ class Translator(object):
                                                groundhog=groundhog,
                                                tgt_unk_id=self.config_server.output.tgt_unk_id,
                                                tgt_indexer=self.tgt_indexer,
-                                               force_finish=force_finish,
                                                prob_space_combination=prob_space_combination, reverse_encdec=self.reverse_encdec,
                                                generate_attention_html=(attn_graph_script_file.name, attn_graph_div_file.name),
                                                attn_graph_with_sum=False,
                                                attn_graph_attribs={'title': '', 'toolbar_location': 'below', 'plot_width': attn_graph_width, 'plot_height': attn_graph_height}, src_indexer=self.src_indexer,
                                                rich_output_filename=rich_output_file.name,
-                                               use_unfinished_translation_if_none_found=True,
+                                               #use_unfinished_translation_if_none_found=True,
                                                replace_unk=True, src=sentence, dic=self.config_server.output.dic,
-                                               remove_unk=remove_unk, normalize_unicode_unk=normalize_unicode_unk, attempt_to_relocate_unk_source=attempt_to_relocate_unk_source)
+                                               remove_unk=remove_unk, normalize_unicode_unk=normalize_unicode_unk, attempt_to_relocate_unk_source=attempt_to_relocate_unk_source,
+                                               constraints_fn_list=constraints_list,
+                                               use_chainerx = self.use_chainerx)
 
             dest_file.seek(0)
             out = dest_file.read()
@@ -204,7 +237,7 @@ class RequestHandler(six.moves.socketserver.BaseRequestHandler):
                     text = sentence.findtext('i_sentence').strip()
                     log.info("text=@@@%s@@@" % text)
 
-                    cmd = self.server.segmenter_command % text
+                    cmd = self.server.segmenter_command % pipes.quote(text)
                     log.info("cmd=%s" % cmd)
                     start_cmd = timeit.default_timer()
 

@@ -7,6 +7,10 @@ _CONFIG_SECTION_TO_DESCRIPTION = {"method": "Translation Method",
                                   "output": "Output Options",
                                   "process": "Translation Process Options"}
 
+# def add_arguments_from_dataclass(parser, dataclass):
+#     for key, field in dataclass.__dataclass_fields__:
+#         assert field.default != dataclasses._MISSING_TYPE
+#         parser.add_argument("--"+key, type = field.type, default = field.default)
 
 def define_parser(parser):
     parser.add_argument("training_config", nargs="?", help="prefix of the trained model",
@@ -21,7 +25,7 @@ def define_parser(parser):
     translation_method_group = parser.add_argument_group(_CONFIG_SECTION_TO_DESCRIPTION["method"])
     translation_method_group.add_argument("--mode", default="translate",
                                           choices=["translate", "align", "translate_attn", "beam_search", "eval_bleu",
-                                                   "score_nbest"], help="target text")
+                                                   "score_nbest", "astar_search", "astar_eval_bleu"], help="target text")
     translation_method_group.add_argument("--beam_width", type=int, default=20, help="beam width")
     translation_method_group.add_argument("--beam_pruning_margin", type=float, default=None, help="beam pruning margin")
     parser.add_argument("--beam_score_coverage_penalty", choices=['none', 'google'], default='none')
@@ -38,6 +42,20 @@ def define_parser(parser):
     translation_method_group.add_argument("--post_score_coverage_penalty", choices=['none', 'google'], default='none')
     translation_method_group.add_argument("--post_score_coverage_penalty_strength", type=float, default=0.2)
     translation_method_group.add_argument("--prob_space_combination", default=False, action="store_true")
+
+    translation_method_group.add_argument("--astar_batch_size", type=int, default=32)
+    translation_method_group.add_argument("--astar_max_queue_size", type=int, default=1000)
+    translation_method_group.add_argument("--astar_prune_margin", type=float)
+    translation_method_group.add_argument("--astar_prune_ratio", type=float)
+    translation_method_group.add_argument("--astar_length_normalization_exponent", type=float, default=1)
+    translation_method_group.add_argument("--astar_length_normalization_constant", type=float, default=0)
+    translation_method_group.add_argument("--astar_priority_eval_string")
+    translation_method_group.add_argument("--astar_max_length_diff", type=float)
+    
+
+    translation_method_group.add_argument("--always_consider_eos_and_placeholders", default=False, action="store_true",
+                        help="consider the possibility of outputing eos and placeholders at each steps during beam search. Deprecated. True by default.")
+    
 
     output_group = parser.add_argument_group(_CONFIG_SECTION_TO_DESCRIPTION["output"])
     output_group.add_argument("--tgt_fn", help="target text")
@@ -73,7 +91,17 @@ def define_parser(parser):
     management_group.add_argument("--segmenter_format", help="format to expect from the segmenter (parse_server, morph)", default='plain')
     management_group.add_argument("--description", help="Optional message to be stored in the configuration file")
     management_group.add_argument("--pp_command", help="command to call on the translation before sending the response to the client.")
+    management_group.add_argument("--force_placeholders", default=False, action="store_true", 
+                help="force the generation of translations with placeholders")
+    management_group.add_argument("--units_placeholders", default=False, action="store_true", help="Use in conjunction with --force_placeholders if each placeholder is a subword unit in the vocabulary (deprecated, now True by default)")
+    management_group.add_argument("--use_chainerx", default=False, action="store_true", 
+                                    help="Use the chainerx library instead of chainer. Can provide speed improvement (if chainerx is installed)")
 
+
+    management_group.add_argument("--bilingual_dic_for_reranking", help="Dictionary file in TSV format. Will be used to create additional constraints during beam search.")
+    management_group.add_argument("--invert_bilingual_dic_for_reranking", default=False, action="store_true")
+
+    management_group.add_argument("--do_hyper_param_search", nargs=3)
 
 class CommandLineValuesException(Exception):
     pass

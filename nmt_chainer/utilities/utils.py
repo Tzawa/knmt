@@ -1,5 +1,15 @@
 #!/usr/bin/env python
-from __future__ import absolute_import, division, print_function, unicode_literals
+from __future__ import (
+    absolute_import, division, print_function, unicode_literals)
+import logging
+import os
+import random
+
+import chainer
+from chainer import Variable, cuda
+import chainerx
+import numpy as np
+import six
 """utils.py: Various utilitity functions for RNNSearch"""
 __author__ = "Fabien Cromieres"
 __license__ = "undecided"
@@ -7,13 +17,7 @@ __version__ = "1.0"
 __email__ = "fabien.cromieres@gmail.com"
 __status__ = "Development"
 
-import os
-import logging
-import numpy as np
-import chainer
-from chainer import Variable, cuda
-import random
-import six
+
 
 logging.basicConfig()
 log = logging.getLogger("rnns:utils")
@@ -21,6 +25,8 @@ log.setLevel(logging.INFO)
 
 
 def ensure_path(path):
+    if len(path) == 0:
+        return
     try:
         os.makedirs(path)
         log.info("Created directory %s" % path)
@@ -28,35 +34,55 @@ def ensure_path(path):
         if not os.path.isdir(path):
             raise
 
+def safe_to_gpu(x, gpu):
+    if hasattr(gpu, "device"):
+        gpu = gpu.device
+    return cuda.to_gpu(x, gpu)
 
-def make_batch_src(src_data, padding_idx=0, gpu=None):
+def move_input_to_device(x, gpu, use_chainerx):
+    assert x.dtype == np.int32 or x.dtype == np.bool
+    if use_chainerx:
+        chainerx_dtype = chainerx.bool if x.dtype == np.bool else chainerx.int32
+        if gpu is None:
+            chainerx_device = "native:0"
+        elif isinstance(gpu, int):
+            chainerx_device = "cuda:%i"%gpu
+        else:
+            chainerx_device = gpu.device
+        return chainerx.array(x, device=chainerx_device, dtype=chainerx_dtype)
+    else:
+        if gpu is None or isinstance(gpu,chainer.backends._cpu.CpuDevice):
+            return x
+        else:
+            return safe_to_gpu(x, gpu)
+
+
+def make_batch_src(src_data, padding_idx=0, gpu=None, use_chainerx=False):
     max_src_size = max(len(x) for x in src_data)
     min_src_size = min(len(x) for x in src_data)
     mb_size = len(src_data)
 
-    src_batch = [np.empty((mb_size,), dtype=np.int32) for _ in six.moves.range(max_src_size)]
-    src_mask = [np.empty((mb_size,), dtype=np.bool) for _ in six.moves.range(max_src_size - min_src_size)]
+    src_batch = np.empty((max_src_size, mb_size), dtype=np.int32) #for _ in six.moves.range(max_src_size)]
+    src_mask = np.empty((max_src_size - min_src_size, mb_size), dtype=np.bool) #[np.empty((mb_size,), dtype=np.bool) for _ in six.moves.range(max_src_size - min_src_size)]
 
     for num_ex in six.moves.range(mb_size):
         this_src_len = len(src_data[num_ex])
         for i in six.moves.range(max_src_size):
             if i < this_src_len:
-                src_batch[i][num_ex] = src_data[num_ex][i]
+                src_batch[i,num_ex] = src_data[num_ex][i]
                 if i >= min_src_size:
-                    src_mask[i - min_src_size][num_ex] = True
+                    src_mask[i - min_src_size, num_ex] = True
             else:
-                src_batch[i][num_ex] = padding_idx
+                src_batch[i,num_ex] = padding_idx
                 assert i >= min_src_size
-                src_mask[i - min_src_size][num_ex] = False
+                src_mask[i - min_src_size, num_ex] = False
 
-    if gpu is not None:
-        return ([Variable(cuda.to_gpu(x, gpu)) for x in src_batch],
-                [cuda.to_gpu(x, gpu) for x in src_mask])
-    else:
-        return [Variable(x) for x in src_batch], src_mask
+    src_batch = move_input_to_device(src_batch, gpu, use_chainerx)
+    return [Variable(x, requires_grad=False) 
+                            for x in src_batch], move_input_to_device(src_mask, gpu, use_chainerx) 
 
 
-def make_batch_src_tgt(training_data, eos_idx=1, padding_idx=0, gpu=None, need_arg_sort=False):
+def make_batch_src_tgt(training_data, eos_idx=1, padding_idx=0, gpu=None, need_arg_sort=False, use_chainerx=False):
     if need_arg_sort:
         training_data_with_argsort = list(six.moves.zip(training_data, six.moves.range(len(training_data))))
         training_data_with_argsort.sort(key=lambda x: len(x[0][1]), reverse=True)
@@ -68,7 +94,7 @@ def make_batch_src_tgt(training_data, eos_idx=1, padding_idx=0, gpu=None, need_a
     mb_size = len(training_data)
 
     src_batch, src_mask = make_batch_src(
-        [x for x, y in training_data], padding_idx=padding_idx, gpu=gpu)
+        [x for x, y in training_data], padding_idx=padding_idx, gpu=gpu, use_chainerx=use_chainerx)
 
     lengths_list = []
     lowest_non_finished = mb_size - 1
@@ -93,10 +119,11 @@ def make_batch_src_tgt(training_data, eos_idx=1, padding_idx=0, gpu=None, need_a
             else:
                 tgt_batch[-1][num_ex] = training_data[num_ex][1][i]
 
-    if gpu is not None:
-        tgt_batch_v = [Variable(cuda.to_gpu(x, gpu)) for x in tgt_batch]
-    else:
-        tgt_batch_v = [Variable(x) for x in tgt_batch]
+    tgt_batch_v = [Variable(move_input_to_device(x, gpu, use_chainerx), requires_grad=False) for x in tgt_batch]
+    # if gpu is not None:
+    #     tgt_batch_v = [Variable(safe_to_gpu(x, gpu)) for x in tgt_batch]
+    # else:
+    #     tgt_batch_v = [Variable(x) for x in tgt_batch]
 
     if need_arg_sort:
         return src_batch, tgt_batch_v, src_mask, argsort
@@ -104,7 +131,7 @@ def make_batch_src_tgt(training_data, eos_idx=1, padding_idx=0, gpu=None, need_a
         return src_batch, tgt_batch_v, src_mask
 
 
-def make_batch_tgt(training_data, eos_idx=1, gpu=None, need_arg_sort=False):
+def make_batch_tgt(training_data, eos_idx=1, gpu=None, need_arg_sort=False, use_chainerx=False):
     if need_arg_sort:
         training_data_with_argsort = list(six.moves.zip(training_data, six.moves.range(len(training_data))))
         training_data_with_argsort.sort(key=lambda x: len(x[0]), reverse=True)
@@ -138,10 +165,11 @@ def make_batch_tgt(training_data, eos_idx=1, gpu=None, need_arg_sort=False):
             else:
                 tgt_batch[-1][num_ex] = training_data[num_ex][i]
 
-    if gpu is not None:
-        tgt_batch_v = [Variable(cuda.to_gpu(x, gpu)) for x in tgt_batch]
-    else:
-        tgt_batch_v = [Variable(x) for x in tgt_batch]
+    tgt_batch_v = [Variable(move_input_to_device(x, gpu, use_chainerx), requires_grad=False) for x in tgt_batch]
+    # if gpu is not None:
+    #     tgt_batch_v = [Variable(safe_to_gpu(x, gpu)) for x in tgt_batch]
+    # else:
+    #     tgt_batch_v = [Variable(x) for x in tgt_batch]
 
     if need_arg_sort:
         return tgt_batch_v, argsort
@@ -212,7 +240,8 @@ def mb_reverser(mb_raw, reverse_src=False, reverse_tgt=False):
 
 def minibatch_provider_curiculum(data, eos_idx, mb_size, nb_mb_for_sorting=1, inplace_sorting=False, gpu=None,
                                  randomized=False, sort_key=lambda x: len(x[1]),
-                                 reverse_src=False, reverse_tgt=False, starting_size=200
+                                 reverse_src=False, reverse_tgt=False, starting_size=200,
+                                 use_chainerx=False
                                  ):
     current_size = starting_size
     while True:
@@ -221,7 +250,8 @@ def minibatch_provider_curiculum(data, eos_idx, mb_size, nb_mb_for_sorting=1, in
         sub_mb_provider = minibatch_provider(used_data, eos_idx, mb_size, nb_mb_for_sorting, gpu=gpu, loop=False,
                                              randomized=randomized, sort_key=sort_key,
                                              inplace_sorting=inplace_sorting,
-                                             reverse_src=reverse_src, reverse_tgt=reverse_tgt)
+                                             reverse_src=reverse_src, reverse_tgt=reverse_tgt,
+                                             use_chainerx=use_chainerx)
 
         for x in sub_mb_provider:
             yield x
@@ -232,14 +262,15 @@ def minibatch_provider_curiculum(data, eos_idx, mb_size, nb_mb_for_sorting=1, in
 
 def minibatch_provider(data, eos_idx, mb_size, nb_mb_for_sorting=1, loop=True, inplace_sorting=False, gpu=None,
                        randomized=False, sort_key=lambda x: len(x[1]),
-                       reverse_src=False, reverse_tgt=False, give_raw_batch=False
+                       reverse_src=False, reverse_tgt=False, give_raw_batch=False,
+                       use_chainerx=False
                        ):
     if nb_mb_for_sorting == -1:
         assert not randomized
         assert not loop
         for mb_raw in batch_sort_and_split(data, mb_size, inplace=inplace_sorting, sort_key=sort_key):
             mb_raw = mb_reverser(mb_raw, reverse_src=reverse_src, reverse_tgt=reverse_tgt)
-            src_batch, tgt_batch, src_mask = make_batch_src_tgt(mb_raw, eos_idx=eos_idx, gpu=gpu)
+            src_batch, tgt_batch, src_mask = make_batch_src_tgt(mb_raw, eos_idx=eos_idx, gpu=gpu, use_chainerx=use_chainerx)
 
             if give_raw_batch:
                 yield src_batch, tgt_batch, src_mask, mb_raw
@@ -257,7 +288,7 @@ def minibatch_provider(data, eos_idx, mb_size, nb_mb_for_sorting=1, loop=True, i
             # ok to sort in place since minibatch_looper will return copies
             for mb_raw in batch_sort_and_split(large_batch, mb_size, inplace=True, sort_key=sort_key):
                 mb_raw = mb_reverser(mb_raw, reverse_src=reverse_src, reverse_tgt=reverse_tgt)
-                src_batch, tgt_batch, src_mask = make_batch_src_tgt(mb_raw, eos_idx=eos_idx, gpu=gpu)
+                src_batch, tgt_batch, src_mask = make_batch_src_tgt(mb_raw, eos_idx=eos_idx, gpu=gpu, use_chainerx=use_chainerx)
                 if give_raw_batch:
                     yield src_batch, tgt_batch, src_mask, mb_raw
                 else:

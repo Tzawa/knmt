@@ -1,47 +1,58 @@
 #!/usr/bin/env python
 """eval.py: Use a RNNSearch Model"""
-from __future__ import absolute_import, division, print_function, unicode_literals
+from __future__ import (absolute_import, division, print_function,
+                        unicode_literals)
+
+import io
+import json
+import logging
+import os.path
+import re
+import sys
+import time
+import unicodedata
+from collections import Counter
+from typing import List, Optional
+
+# import h5py
+import bokeh.embed
+import numpy as np
+import six
+from chainer import cuda, serializers
+
+import nmt_chainer.dataprocessing.make_data as make_data
+import nmt_chainer.dataprocessing.make_data_conf as make_data_conf
+import nmt_chainer.training_module.train as train
+import nmt_chainer.training_module.train_config as train_config
+import nmt_chainer.translation.beam_search as beam_search
+from nmt_chainer.dataprocessing.processors import build_dataset_one_side_pp
+from nmt_chainer.translation.beam_search import BeamSearchParams
+# import visualisation
+from nmt_chainer.utilities import bleu_computer
+from nmt_chainer.utilities.argument_parsing_tools import OrderedNamespace
+from nmt_chainer.utilities.file_infos import create_filename_infos
+from nmt_chainer.utilities.utils import ensure_path
+
+from . import dictionnary_handling
+
+# from utils import make_batch_src, make_batch_src_tgt, minibatch_provider, compute_bleu_with_unk_as_wrong, de_batch
+from nmt_chainer.translation.evaluation import (  # convert_idx_to_string,; convert_idx_to_string_with_attn
+    batch_align, beam_search_translate, greedy_batch_translate)
+
 __author__ = "Fabien Cromieres"
 __license__ = "undecided"
 __version__ = "1.0"
 __email__ = "fabien.cromieres@gmail.com"
 __status__ = "Development"
 
-import io
-import json
-import numpy as np
-from chainer import cuda, serializers
-import sys
-from nmt_chainer.dataprocessing.processors import build_dataset_one_side_pp
-import nmt_chainer.dataprocessing.make_data as make_data
-import nmt_chainer.training_module.train as train
-import nmt_chainer.training_module.train_config as train_config
-import nmt_chainer.dataprocessing.make_data_conf as make_data_conf
-import re
-from nmt_chainer.utilities.file_infos import create_filename_infos
-from nmt_chainer.utilities.argument_parsing_tools import OrderedNamespace
-import time
-import os.path
-import six
-from nmt_chainer.utilities.utils import ensure_path
-# from utils import make_batch_src, make_batch_src_tgt, minibatch_provider, compute_bleu_with_unk_as_wrong, de_batch
-from nmt_chainer.translation.evaluation import (greedy_batch_translate,
-                                                #                         convert_idx_to_string,
-                                                batch_align,
-                                                beam_search_translate,
-                                                #                         convert_idx_to_string_with_attn
-                                                )
 
-# import visualisation
-from nmt_chainer.utilities import bleu_computer
-import logging
-# import h5py
-import bokeh.embed
+
 
 
 logging.basicConfig()
 log = logging.getLogger("rnns:eval")
 log.setLevel(logging.INFO)
+
 
 class AttentionVisualizer(object):
     def __init__(self):
@@ -114,53 +125,56 @@ class RichOutputWriter(object):
         log.info("done writing JSON translation infos to %s" % self.filename)
 
 
-def beam_search_all(gpu, encdec, eos_idx, src_data, beam_width, beam_pruning_margin, beam_score_coverage_penalty, beam_score_coverage_penalty_strength, nb_steps,
-                    nb_steps_ratio, beam_score_length_normalization, beam_score_length_normalization_strength, post_score_length_normalization, post_score_length_normalization_strength,
+def beam_search_all(gpu, encdec, eos_idx, src_data,
+                    beam_search_params:beam_search.BeamSearchParams,
+                    nb_steps,
+                    nb_steps_ratio, 
+                    post_score_length_normalization, post_score_length_normalization_strength,
                     post_score_coverage_penalty, post_score_coverage_penalty_strength,
                     groundhog,
-                    tgt_unk_id, tgt_indexer, force_finish=False,
+                    tgt_unk_id, tgt_indexer, 
                     prob_space_combination=False, reverse_encdec=None,
-                    use_unfinished_translation_if_none_found=False,
                     replace_unk=False,
                     src=None,
                     dic=None,
                     remove_unk=False,
                     normalize_unicode_unk=False,
                     attempt_to_relocate_unk_source=False,
-                    nbest=None):
+                    nbest=None,
+                    constraints_fn_list:Optional[List[beam_search.BeamSearchConstraints]]=None,
+                    use_astar=False,
+                    astar_params:beam_search.AStarParams=beam_search.AStarParams(),
+                    use_chainerx=False):
 
     log.info("starting beam search translation of %i sentences" % len(src_data))
     if isinstance(encdec, (list, tuple)) and len(encdec) > 1:
         log.info("using ensemble of %i models" % len(encdec))
 
-    with cuda.get_device(gpu):
+    with cuda.get_device_from_id(gpu):
         translations_gen = beam_search_translate(
-            encdec, eos_idx, src_data, beam_width=beam_width, nb_steps=nb_steps,
-            gpu=gpu, beam_pruning_margin=beam_pruning_margin,
-            beam_score_coverage_penalty=beam_score_coverage_penalty,
-            beam_score_coverage_penalty_strength=beam_score_coverage_penalty_strength,
+            encdec, eos_idx, src_data, 
+            beam_search_params,
+            nb_steps=nb_steps,
+            gpu=gpu, 
             nb_steps_ratio=nb_steps_ratio,
             need_attention=True,
-            beam_score_length_normalization=beam_score_length_normalization,
-            beam_score_length_normalization_strength=beam_score_length_normalization_strength,
             post_score_length_normalization=post_score_length_normalization,
             post_score_length_normalization_strength=post_score_length_normalization_strength,
             post_score_coverage_penalty=post_score_coverage_penalty,
             post_score_coverage_penalty_strength=post_score_coverage_penalty_strength,
-            groundhog=groundhog, force_finish=force_finish,
+            groundhog=groundhog, 
             prob_space_combination=prob_space_combination,
             reverse_encdec=reverse_encdec,
-            use_unfinished_translation_if_none_found=use_unfinished_translation_if_none_found,
-            nbest=nbest)
+            nbest=nbest,
+            constraints_fn_list=constraints_fn_list,
+            use_astar=use_astar,
+            astar_params=astar_params,
+            use_chainerx=use_chainerx)
 
         for num_t, translations in enumerate(translations_gen):
             res_trans = []
             for trans in translations:
                 (t, score, attn) = trans
-                if num_t % 200 == 0:
-                    print(num_t, file=sys.stderr)
-                elif num_t % 40 == 0:
-                    print("*", file=sys.stderr)
 #                 t, score = bests[1]
 #                 ct = convert_idx_to_string(t, tgt_voc + ["#T_UNK#"])
 #                 ct = convert_idx_to_string_with_attn(t, tgt_voc, attn, unk_idx = len(tgt_voc))
@@ -183,7 +197,7 @@ def beam_search_all(gpu, encdec, eos_idx, src_data, beam_width, beam_pruning_mar
                 unk_mapping = []
                 ct = " ".join(translated)
                 if ct != '':
-                    unk_pattern = re.compile("#T_UNK_(\d+)#")
+                    unk_pattern = re.compile(r"#T_UNK_(\d+)#")
                     for idx, word in enumerate(ct.split(' ')):
                         match = unk_pattern.match(word)
                         if (match):
@@ -197,17 +211,17 @@ def beam_search_all(gpu, encdec, eos_idx, src_data, beam_width, beam_pruning_mar
 
             yield res_trans
 
-        print('', file=sys.stderr)
 
-
-def translate_to_file_with_beam_search(dest_fn, gpu, encdec, eos_idx, src_data, beam_width, beam_pruning_margin, beam_score_coverage_penalty, beam_score_coverage_penalty_strength, nb_steps,
-                                       nb_steps_ratio, beam_score_length_normalization, beam_score_length_normalization_strength, post_score_length_normalization, post_score_length_normalization_strength,
+def translate_to_file_with_beam_search(dest_fn, gpu, encdec, eos_idx, src_data, 
+                                       beam_search_params:beam_search.BeamSearchParams,
+                                       nb_steps,
+                                       nb_steps_ratio, 
+                                       post_score_length_normalization, post_score_length_normalization_strength,
                                        post_score_coverage_penalty, post_score_coverage_penalty_strength,
                                        groundhog,
-                                       tgt_unk_id, tgt_indexer, force_finish=False,
+                                       tgt_unk_id, tgt_indexer, 
                                        prob_space_combination=False, reverse_encdec=None,
                                        generate_attention_html=None, attn_graph_with_sum=True, attn_graph_attribs=None, src_indexer=None, rich_output_filename=None,
-                                       use_unfinished_translation_if_none_found=False,
                                        replace_unk=False,
                                        src=None,
                                        dic=None,
@@ -215,25 +229,35 @@ def translate_to_file_with_beam_search(dest_fn, gpu, encdec, eos_idx, src_data, 
                                        normalize_unicode_unk=False,
                                        attempt_to_relocate_unk_source=False,
                                        unprocessed_output_filename=None,
-                                       nbest=None):
+                                       nbest=None,
+                                       constraints_fn_list:Optional[List[beam_search.BeamSearchConstraints]]=None,
+                                       use_astar=False,
+                                       astar_params:beam_search.AStarParams=beam_search.AStarParams(),
+                                       use_chainerx=False):
 
     log.info("writing translation to %s " % dest_fn)
     out = io.open(dest_fn, "wt", encoding="utf8")
 
-    translation_iterator = beam_search_all(gpu, encdec, eos_idx, src_data, beam_width, beam_pruning_margin, beam_score_coverage_penalty, beam_score_coverage_penalty_strength, nb_steps,
-                                           nb_steps_ratio, beam_score_length_normalization, beam_score_length_normalization_strength, post_score_length_normalization, post_score_length_normalization_strength,
+    translation_iterator = beam_search_all(gpu, encdec, eos_idx, src_data, 
+                                           beam_search_params,
+                                           nb_steps,
+                                           nb_steps_ratio, 
+                                           post_score_length_normalization, post_score_length_normalization_strength,
                                            post_score_coverage_penalty, post_score_coverage_penalty_strength,
                                            groundhog,
-                                           tgt_unk_id, tgt_indexer, force_finish=force_finish,
+                                           tgt_unk_id, tgt_indexer, 
                                            prob_space_combination=prob_space_combination, reverse_encdec=reverse_encdec,
-                                           use_unfinished_translation_if_none_found=use_unfinished_translation_if_none_found,
                                            replace_unk=replace_unk,
                                            src=src,
                                            dic=dic,
                                            remove_unk=remove_unk,
                                            normalize_unicode_unk=normalize_unicode_unk,
                                            attempt_to_relocate_unk_source=attempt_to_relocate_unk_source,
-                                           nbest=nbest)
+                                           nbest=nbest,
+                                           constraints_fn_list=constraints_fn_list,
+                                           use_astar=use_astar,
+                                           astar_params=astar_params,
+                                           use_chainerx=use_chainerx)
 
     attn_vis = None
     if generate_attention_html is not None:
@@ -365,13 +389,19 @@ def create_encdec(config_eval):
 
             check_if_vocabulary_info_compatible(this_eos_idx, this_src_indexer, this_tgt_indexer, eos_idx, src_indexer, tgt_indexer)
             model_infos_list.append(create_filename_infos(trained_model_fn))
-#             if args.gpu is not None:
-#                 this_encdec = this_encdec.to_gpu(args.gpu)
 
             encdec_list.append(this_encdec)
 
-    if 'gpu' in config_eval.process and config_eval.process.gpu is not None:
-        encdec_list = [encdec.to_gpu(config_eval.process.gpu) for encdec in encdec_list]
+    if config_eval.process.use_chainerx:
+        if 'gpu' in config_eval.process and config_eval.process.gpu is not None:
+            encdec_list = [encdec.to_device("cuda:%i"%config_eval.process.gpu) for encdec in encdec_list]
+        else:
+            encdec_list = [encdec.to_device("native:0") for encdec in encdec_list]
+    else:
+        if 'gpu' in config_eval.process and config_eval.process.gpu is not None:
+            encdec_list = [encdec.to_gpu(config_eval.process.gpu) for encdec in encdec_list]
+
+        
 
     if 'reverse_training_config' in config_eval.process and config_eval.process.reverse_training_config is not None:
         reverse_encdec, reverse_eos_idx, reverse_src_indexer, reverse_tgt_indexer = create_and_load_encdec_from_files(
@@ -393,6 +423,60 @@ def create_encdec(config_eval):
 
     return encdec_list, eos_idx, src_indexer, tgt_indexer, reverse_encdec, model_infos_list
 
+def placeholder_constraints_builder(src_indexer, tgt_indexer, units_placeholders=False):
+    if False: #not units_placeholders:
+        placeholder_matcher = re.compile(r"<K-\d+>")
+        def make_constraints(src, src_seq)->beam_search.BeamSearchConstraints:
+            src_placeholders_list = placeholder_matcher.findall(src)
+            src_placeholders_set = set(src_placeholders_list)
+            if len(src_placeholders_set) != len(src_placeholders_list):
+                raise Exception("Current assumption is that there is no duplicate placeholders")
+            def constraint_fn(tgt_seq):
+                tgt = tgt_indexer.deconvert(tgt_seq)
+                tgt_placeholders_list = placeholder_matcher.findall(tgt)
+                tgt_placeholders_set = set(tgt_placeholders_list)
+                if len(tgt_placeholders_set) != len(tgt_placeholders_list):
+                    return -1 #disallow duplicate placeholders on target side
+                if len(tgt_placeholders_set - src_placeholders_set) != 0:
+                    return -1 #disallow generating a placeholder not in source
+                if tgt_placeholders_set == src_placeholders_set:
+                    return 1 #all constraints satisfied
+                #else return proportion of required placeholders in target
+                assert len(tgt_placeholders_set) < len(src_placeholders_set)
+                return len(tgt_placeholders_set) / len(src_placeholders_set)
+            
+            return beam_search.BeamSearchConstraints(constraint_fn=constraint_fn)
+        return make_constraints
+    else:
+        placeholder_dictionary = {}
+        placeholders_list_all = []
+        placeholders_list = []
+        for i in range(100):
+            placeholder = "<K-%02i>"%i
+            tgt_idx = tgt_indexer.convert(placeholder)
+            src_idx = src_indexer.convert(placeholder)
+            if len(tgt_idx) != 1 or len(src_idx)!=1:
+                pass
+            else:
+                tgt_idx = tgt_idx[0]
+                src_idx = src_idx[0]
+                if not tgt_indexer.is_unk_idx(tgt_idx) and not src_indexer.is_unk_idx(src_idx):
+                    placeholder_dictionary[src_idx] = tgt_idx
+                    placeholders_list_all.append( (placeholder, src_idx, tgt_idx))
+                    placeholders_list.append(tgt_idx)
+        log.info("Found %i placeholders: %r  l:%i,%i"%(len(placeholders_list_all), placeholders_list_all, 
+                len(tgt_indexer), len(src_indexer)))
+
+        def make_constraints(src, src_seq)->beam_search.BeamSearchConstraints:
+            required_tgt_idx = beam_search.TgtIdxConstraint()
+            required_tgt_idx.set_placeholders_idx_list(placeholders_list)
+            for idx in src_seq:
+                if idx in placeholder_dictionary:
+                    required_tgt_idx.add(placeholder_dictionary[idx])
+            
+            return beam_search.BeamSearchConstraints(required_tgt_idx=required_tgt_idx)
+        return make_constraints
+
 
 def do_eval(config_eval):
     src_fn = config_eval.process.src_fn
@@ -413,6 +497,12 @@ def do_eval(config_eval):
     beam_score_length_normalization_strength = config_eval.method.beam_score_length_normalization_strength
     beam_score_coverage_penalty = config_eval.beam_score_coverage_penalty
     beam_score_coverage_penalty_strength = config_eval.beam_score_coverage_penalty_strength
+    always_consider_eos_and_placeholders = config_eval.method.always_consider_eos_and_placeholders
+
+    if config_eval.process.force_placeholders:
+        # making it  default for now
+        always_consider_eos_and_placeholders = True
+
     post_score_length_normalization = config_eval.method.post_score_length_normalization
     post_score_length_normalization_strength = config_eval.method.post_score_length_normalization_strength
     groundhog = config_eval.method.groundhog
@@ -431,11 +521,25 @@ def do_eval(config_eval):
     post_score_coverage_penalty = config_eval.method.post_score_coverage_penalty
     post_score_coverage_penalty_strength = config_eval.method.post_score_coverage_penalty_strength
 
-    time_start = time.clock()
+    time_start = time.perf_counter()
 
-    encdec_list, eos_idx, src_indexer, tgt_indexer, reverse_encdec, model_infos_list = create_encdec(config_eval)
+    
+
+    astar_params = beam_search.AStarParams(
+        astar_batch_size=config_eval.method.astar_batch_size,
+        astar_max_queue_size=config_eval.method.astar_max_queue_size,
+        astar_prune_margin=config_eval.method.astar_prune_margin,
+        astar_prune_ratio=config_eval.method.astar_prune_ratio,
+        length_normalization_exponent=config_eval.method.astar_length_normalization_exponent,
+        length_normalization_constant=config_eval.method.astar_length_normalization_constant,
+        astar_priority_eval_string=config_eval.method.astar_priority_eval_string,
+        max_length_diff = config_eval.method.astar_max_length_diff)
+
+    make_constraints_dict = None
 
     if config_eval.process.server is None:
+        encdec_list, eos_idx, src_indexer, tgt_indexer, reverse_encdec, model_infos_list = create_encdec(config_eval)
+
         eval_dir_placeholder = "@eval@/"
         if dest_fn.startswith(eval_dir_placeholder):
             if config_eval.trained_model is not None:
@@ -462,17 +566,99 @@ def do_eval(config_eval):
                 log.info("using files from config as ref:%s", test_tgt_from_config)
                 ref = test_tgt_from_config
 
+        if config_eval.process.force_placeholders:
+            if make_constraints_dict is None:
+                make_constraints_dict = {}
+            make_constraints_dict["ph_constraint"] = placeholder_constraints_builder(src_indexer, tgt_indexer, 
+                    units_placeholders=config_eval.process.units_placeholders)
+
+                    
+
+        if config_eval.process.bilingual_dic_for_reranking:
+            if make_constraints_dict is None:
+                make_constraints_dict = {}
+
+            print("**making ja en dic")
+            ja_en_search, en_ja_search = dictionnary_handling.load_search_trie(
+                config_eval.process.bilingual_dic_for_reranking, config_eval.process.invert_bilingual_dic_for_reranking)
+            
+            print("**define constraints")
+            make_constraints_dict["dic_constraint"] = dictionnary_handling.make_constraint(ja_en_search, en_ja_search, tgt_indexer)
+            
+
+
+        elif False:
+
+            re_word = re.compile(r"[A-Za-z]+")
+            re_digits = re.compile(r"\d+")
+            def unsegment(s):
+                res = []
+                for w in s.split(" "):
+                    if w.startswith("▁"):
+                        w = " " + w[1:]
+                    res.append(w)
+                return "".join(res)
+
+            def make_constraints(src, src_seq):
+                line_src = unsegment(src)
+                line_src = unicodedata.normalize('NFKC', line_src)
+                word_list = [word for word in re_word.findall(line_src) if len(word) > 3]
+                digit_list = [digit for digit in re_digits.findall(line_src) if len(digit) > 2]
+                if len(word_list) == 0 and len(digit_list)==0:
+                    def constraint_fn(tgt_seq):
+                        return 1
+                else:
+                    def constraint_fn(tgt_seq):
+                        tgt = tgt_indexer.deconvert(tgt_seq)
+                        line_tgt = unsegment(tgt)
+                        line_tgt = unicodedata.normalize('NFKC', line_tgt)
+                        matched_word = 0
+                        for word in word_list:
+                            if word in line_ref:
+                                matched_word += 1
+
+                        matched_digit = 0
+                        for digit in digit_list:
+                            if digit in line_ref:
+                                matched_digit += 1
+
+                        if matched_word == len(word_list) and matched_digit == len(digit_list):
+                            return 1
+                        else:
+                            return (matched_word + matched_digit)/(len(word_list) + len(digit_list))
+
+                    return constraint_fn
+
+        else:
+            make_constraints_dict = None
+
         log.info("opening source file %s" % src_fn)
-        src_data, stats_src_pp = build_dataset_one_side_pp(src_fn, src_pp=src_indexer,
-                                                           max_nb_ex=max_nb_ex)
+
+        preprocessed_input = build_dataset_one_side_pp(src_fn, src_pp=src_indexer,
+                                                           max_nb_ex=max_nb_ex,
+                                                           make_constraints_dict=make_constraints_dict)
+
+        if make_constraints_dict is not None:
+            src_data, stats_src_pp, constraints_list = preprocessed_input
+        else:
+             src_data, stats_src_pp = preprocessed_input
+             constraints_list = None                                             
         log.info("src data stats:\n%s", stats_src_pp.make_report())
+
+        translation_infos = OrderedNamespace()
+        translation_infos["src"] = src_fn
+        translation_infos["tgt"] = tgt_fn
+        translation_infos["ref"] = ref
+
+        for num_model, model_infos in enumerate(model_infos_list):
+            translation_infos["model%i" % num_model] = model_infos
 
     if dest_fn is not None:
         save_eval_config_fn = dest_fn + ".eval.init.config.json"
         log.info("Saving initial eval config to %s" % save_eval_config_fn)
         config_eval.save_to(save_eval_config_fn)
 
-    translation_infos = OrderedNamespace()
+
 #     log.info("%i sentences loaded" % make_data_infos.nb_ex)
 #     log.info("#tokens src: %i   of which %i (%f%%) are unknown"%(make_data_infos.total_token,
 #                                                                  make_data_infos.total_count_unk,
@@ -493,21 +679,17 @@ def do_eval(config_eval):
 
 #     translations = greedy_batch_translate(encdec, eos_idx, src_data, batch_size = mb_size, gpu = args.gpu)
 
-    translation_infos["src"] = src_fn
-    translation_infos["tgt"] = tgt_fn
-    translation_infos["ref"] = ref
 
-    for num_model, model_infos in enumerate(model_infos_list):
-        translation_infos["model%i" % num_model] = model_infos
 
-    time_all_loaded = time.clock()
+    time_all_loaded = time.perf_counter()
 
     if mode == "translate":
         log.info("writing translation of to %s" % dest_fn)
-        with cuda.get_device(gpu):
+        with cuda.get_device_from_id(gpu):
             assert len(encdec_list) == 1
             translations = greedy_batch_translate(
-                encdec_list[0], eos_idx, src_data, batch_size=mb_size, gpu=gpu, nb_steps=nb_steps)
+                encdec_list[0], eos_idx, src_data, batch_size=mb_size, gpu=gpu, nb_steps=nb_steps, 
+                                use_chainerx=config_eval.process.use_chainerx)
         out = io.open(dest_fn, "wt", encoding="utf8")
         for t in translations:
             if t[-1] == eos_idx:
@@ -516,69 +698,102 @@ def do_eval(config_eval):
 #             ct = convert_idx_to_string(t, tgt_voc + ["#T_UNK#"])
             out.write(ct + "\n")
 
-    elif mode == "beam_search" or mode == "eval_bleu":
+    elif mode == "beam_search" or mode == "eval_bleu" or mode == "astar_search" or mode == "astar_eval_bleu":
         if config_eval.process.server is not None:
             from nmt_chainer.translation.server import do_start_server
             do_start_server(config_eval)
         else:
-            translate_to_file_with_beam_search(dest_fn, gpu, encdec_list, eos_idx, src_data,
-                                               beam_width=beam_width,
-                                               beam_pruning_margin=beam_pruning_margin,
-                                               beam_score_coverage_penalty=beam_score_coverage_penalty,
-                                               beam_score_coverage_penalty_strength=beam_score_coverage_penalty_strength,
-                                               nb_steps=nb_steps,
-                                               nb_steps_ratio=nb_steps_ratio,
-                                               beam_score_length_normalization=beam_score_length_normalization,
-                                               beam_score_length_normalization_strength=beam_score_length_normalization_strength,
-                                               post_score_length_normalization=post_score_length_normalization,
-                                               post_score_length_normalization_strength=post_score_length_normalization_strength,
-                                               post_score_coverage_penalty=post_score_coverage_penalty,
-                                               post_score_coverage_penalty_strength=post_score_coverage_penalty_strength,
-                                               groundhog=groundhog,
-                                               tgt_unk_id=tgt_unk_id,
-                                               tgt_indexer=tgt_indexer,
-                                               force_finish=force_finish,
-                                               prob_space_combination=prob_space_combination,
-                                               reverse_encdec=reverse_encdec,
-                                               generate_attention_html=generate_attention_html,
-                                               src_indexer=src_indexer,
-                                               rich_output_filename=rich_output_filename,
-                                               use_unfinished_translation_if_none_found=True,
-                                               unprocessed_output_filename=dest_fn + ".unprocessed",
-                                               nbest=nbest)
 
-            translation_infos["dest"] = dest_fn
-            translation_infos["unprocessed"] = dest_fn + ".unprocessed"
-            if mode == "eval_bleu":
-                if ref is not None:
-                    bc = bleu_computer.get_bc_from_files(ref, dest_fn)
-                    print("bleu before unk replace:", bc)
-                    translation_infos["bleu"] = bc.bleu()
-                    translation_infos["bleu_infos"] = str(bc)
+
+            def translate_closure(beam_width, nb_steps_ratio):
+                beam_search_params = beam_search.BeamSearchParams(
+                                                beam_width=beam_width,
+                                                beam_pruning_margin=beam_pruning_margin,
+                                                beam_score_coverage_penalty=beam_score_coverage_penalty,
+                                                beam_score_coverage_penalty_strength=beam_score_coverage_penalty_strength,
+                                                beam_score_length_normalization=beam_score_length_normalization,
+                                                beam_score_length_normalization_strength=beam_score_length_normalization_strength,
+                                                force_finish=force_finish,
+                                                use_unfinished_translation_if_none_found=True,
+                                                always_consider_eos_and_placeholders=always_consider_eos_and_placeholders
+                )
+
+
+                translate_to_file_with_beam_search(dest_fn, gpu, encdec_list, eos_idx, src_data,
+                                                beam_search_params=beam_search_params,
+                                                nb_steps=nb_steps,
+                                                nb_steps_ratio=nb_steps_ratio,
+                                                post_score_length_normalization=post_score_length_normalization,
+                                                post_score_length_normalization_strength=post_score_length_normalization_strength,
+                                                post_score_coverage_penalty=post_score_coverage_penalty,
+                                                post_score_coverage_penalty_strength=post_score_coverage_penalty_strength,
+                                                groundhog=groundhog,
+                                                tgt_unk_id=tgt_unk_id,
+                                                tgt_indexer=tgt_indexer,
+                                                prob_space_combination=prob_space_combination,
+                                                reverse_encdec=reverse_encdec,
+                                                generate_attention_html=generate_attention_html,
+                                                src_indexer=src_indexer,
+                                                rich_output_filename=rich_output_filename,
+                                                unprocessed_output_filename=dest_fn + ".unprocessed",
+                                                nbest=nbest,
+                                                constraints_fn_list=constraints_list,
+                                                use_astar= (mode == "astar_search" or mode == "astar_eval_bleu"),
+                                                astar_params=astar_params,
+                                                use_chainerx=config_eval.process.use_chainerx)
+
+                translation_infos["dest"] = dest_fn
+                translation_infos["unprocessed"] = dest_fn + ".unprocessed"
+                if mode == "eval_bleu" or mode == "astar_eval_bleu":
+                    if ref is not None:
+                        bc = bleu_computer.get_bc_from_files(ref, dest_fn)
+                        print("bleu before unk replace:", bc)
+                        translation_infos["bleu"] = bc.bleu()
+                        translation_infos["bleu_infos"] = str(bc)
+                    else:
+                        print("bleu before unk replace: No Ref Provided")
+
+                    from nmt_chainer.utilities import replace_tgt_unk
+                    replace_tgt_unk.replace_unk(dest_fn, src_fn, dest_fn + ".unk_replaced", dic, remove_unk,
+                                                normalize_unicode_unk,
+                                                attempt_to_relocate_unk_source)
+                    translation_infos["unk_replaced"] = dest_fn + ".unk_replaced"
+
+                    if ref is not None:
+                        bc = bleu_computer.get_bc_from_files(ref, dest_fn + ".unk_replaced")
+                        print("bleu after unk replace:", bc)
+                        translation_infos["post_unk_bleu"] = bc.bleu()
+                        translation_infos["post_unk_bleu_infos"] = str(bc)
+                    else:
+                        print("bleu before unk replace: No Ref Provided")
+                    return -bc.bleu()
                 else:
-                    print("bleu before unk replace: No Ref Provided")
+                    return None
 
-                from nmt_chainer.utilities import replace_tgt_unk
-                replace_tgt_unk.replace_unk(dest_fn, src_fn, dest_fn + ".unk_replaced", dic, remove_unk,
-                                            normalize_unicode_unk,
-                                            attempt_to_relocate_unk_source)
-                translation_infos["unk_replaced"] = dest_fn + ".unk_replaced"
-
-                if ref is not None:
-                    bc = bleu_computer.get_bc_from_files(ref, dest_fn + ".unk_replaced")
-                    print("bleu after unk replace:", bc)
-                    translation_infos["post_unk_bleu"] = bc.bleu()
-                    translation_infos["post_unk_bleu_infos"] = str(bc)
-                else:
-                    print("bleu before unk replace: No Ref Provided")
+            if  config_eval.process.do_hyper_param_search is not None:
+                study_filename, study_name, n_trials = do_hyper_param_search
+                n_trials = int(n_trials)
+                import optuna
+                def objective(trial):
+                    nb_steps_ratio = trial.suggest_uniform('nb_steps_ratio', 0.9, 3.5)
+                    beam_width = trial.suggest_int("beam_width", 2, 50)
+                    return translate_closure(beam_width, nb_steps_ratio)
+                study = optuna.create_study(study_name=study_name, storage="sqlite:///" + study_filename)
+                study.optimize(objective, n_trials=n_trials)
+                print(study.best_params)
+                print(study.best_value)
+                print(study.best_trial)
+                
+            else: # hyperparams optim
+                translate_closure(beam_width, nb_steps_ratio)
 
     elif mode == "translate_attn":
         log.info("writing translation + attention as html to %s" % dest_fn)
-        with cuda.get_device(gpu):
+        with cuda.get_device_from_id(gpu):
             assert len(encdec_list) == 1
             translations, attn_all = greedy_batch_translate(
                 encdec_list[0], eos_idx, src_data, batch_size=mb_size, gpu=gpu,
-                get_attention=True, nb_steps=nb_steps)
+                get_attention=True, nb_steps=nb_steps, use_chainerx=config_eval.process.use_chainerx)
 #         tgt_voc_with_unk = tgt_voc + ["#T_UNK#"]
 #         src_voc_with_unk = src_voc + ["#S_UNK#"]
         assert len(translations) == len(src_data)
@@ -608,10 +823,11 @@ def do_eval(config_eval):
         assert tgt_data is not None
         assert len(tgt_data) == len(src_data)
         log.info("writing alignment as html to %s" % dest_fn)
-        with cuda.get_device(gpu):
+        with cuda.get_device_from_id(gpu):
             assert len(encdec_list) == 1
             loss, attn_all = batch_align(
-                encdec_list[0], eos_idx, list(six.moves.zip(src_data, tgt_data)), batch_size=mb_size, gpu=gpu)
+                encdec_list[0], eos_idx, list(six.moves.zip(src_data, tgt_data)), batch_size=mb_size, gpu=gpu, 
+                            use_chainerx=config_eval.process.use_chainerx)
 #         tgt_voc_with_unk = tgt_voc + ["#T_UNK#"]
 #         src_voc_with_unk = src_voc + ["#S_UNK#"]
 
@@ -720,7 +936,7 @@ def do_eval(config_eval):
             for score in res[num]:
                 out.write("%i %f\n" % (num, score))
 
-    time_end = time.clock()
+    time_end = time.perf_counter()
     translation_infos["loading_time"] = time_all_loaded - time_start
     translation_infos["translation_time"] = time_end - time_all_loaded
     translation_infos["total_time"] = time_end - time_start

@@ -1,33 +1,50 @@
 #!/usr/bin/env python
 """training.py: training procedures."""
-from __future__ import absolute_import, division, print_function, unicode_literals
+from __future__ import (absolute_import, division, print_function,
+                        unicode_literals)
+
+import datetime
+import json
+import logging
+import math
+import socket
+import sys
+import time
+
+import chainer.dataset.iterator
+import chainer.functions as F
+import chainer.iterators
+import chainer.training
+import chainer.training.extensions
+import chainerx
+import numpy
+import six
+from chainer import serializers
+
+from nmt_chainer.translation.evaluation import (compute_loss_all, sample_once,
+                                                sample_once_ff,
+                                                translate_to_file)
 from nmt_chainer.utilities import argument_parsing_tools
+from nmt_chainer.utilities.utils import (make_batch_src_tgt,
+                                         minibatch_provider,
+                                         minibatch_provider_curiculum)
+
+try:
+    from chainer.iterators import _statemachine  #for chainer >=6
+except ImportError:
+    pass
+
 __author__ = "Fabien Cromieres"
 __license__ = "undecided"
 __version__ = "1.0"
 __email__ = "fabien.cromieres@gmail.com"
 __status__ = "Development"
 
-from chainer import serializers
-import time
 
-import logging
-import sys
 # import h5py
 
-import math
-import json
 
-from nmt_chainer.utilities.utils import minibatch_provider, minibatch_provider_curiculum, make_batch_src_tgt
-from nmt_chainer.translation.evaluation import (
-    compute_loss_all, translate_to_file, sample_once, sample_once_ff)
 
-import chainer.functions as F
-import chainer.iterators
-import chainer.dataset.iterator
-import chainer.training
-import chainer.training.extensions
-import datetime
 
 try:
     import cupy
@@ -51,7 +68,6 @@ def example_complexity(ex):
     return sent_complexity(ex[0]) + sent_complexity(ex[1])
 
 
-import numpy
 
 # def write_encdec_loss_computation_graph(encdec, dest_file):
 #     batch = [
@@ -87,26 +103,39 @@ class SerialIteratorWithPeek(chainer.iterators.SerialIterator):
         if not self._repeat and self.epoch > 0:
             raise StopIteration
 
-        i = self.current_position
-        i_end = i + self.batch_size
-        N = len(self.dataset)
-        if self._order is None:
-            batch = self.dataset[i:i_end]
-        else:
-            batch = [self.dataset[index] for index in self._order[i:i_end]]
+        if hasattr(self, "order_sampler"):
+            state, indices = _statemachine.iterator_statemachine(
+                self._state, self.batch_size, self.repeat, self.order_sampler,
+                len(self.dataset))
+            if indices is None:
+                return []
 
-        if i_end >= N:
-            if self._repeat:
-                rest = i_end - N
-                if self._order is not None:
-                    numpy.random.shuffle(self._order)
-                if rest > 0:
-                    if self._order is None:
-                        batch += list(self.dataset[:rest])
-                    else:
-                        batch += [self.dataset[index]
-                                  for index in self._order[:rest]]
-        return batch
+            batch = [self.dataset[index] for index in indices]
+            return batch
+
+        else:
+
+            i = self.current_position
+            i_end = i + self.batch_size
+            N = len(self.dataset)
+            if (not hasattr(self, "_order")) or self._order is None:
+                batch = self.dataset[i:i_end]
+            else:
+                batch = [self.dataset[index] for index in self._order[i:i_end]]
+
+            if i_end >= N:
+                if self._repeat:
+                    rest = i_end - N
+
+                    if hasattr(self, "_order") and self._order is not None:
+                            numpy.random.shuffle(self._order)
+                    if rest > 0:
+                        if (not hasattr(self, "_order")) or self._order is None:
+                            batch += list(self.dataset[:rest])
+                        else:
+                            batch += [self.dataset[index]
+                                    for index in self._order[:rest]]
+            return batch
 
 
 class LengthBasedSerialIterator(chainer.dataset.iterator.Iterator):
@@ -329,7 +358,6 @@ class DynamicLengthBasedSerialIterator(chainer.dataset.iterator.Iterator):
 
 
 
-import six
 
 
 def make_collection_of_variables(in_arrays):
@@ -351,7 +379,7 @@ class Updater(chainer.training.StandardUpdater):
         self.need_to_convert_to_variables = need_to_convert_to_variables
 
     def update_core(self):
-        t0 = time.clock()
+        t0 = time.perf_counter()
 
         batch = self._iterators['main'].next()
         in_arrays = self.converter(batch, self.device)
@@ -362,7 +390,7 @@ class Updater(chainer.training.StandardUpdater):
         if self.need_to_convert_to_variables:
             in_arrays = make_collection_of_variables(in_arrays)
 
-        t1 = time.clock()
+        t1 = time.perf_counter()
 
         try:
             if isinstance(in_arrays, tuple):
@@ -374,7 +402,7 @@ class Updater(chainer.training.StandardUpdater):
         except CudaException:
             log.warn("CUDARuntimeError during update iteration. Will try to skip this batch and continue")
 
-        t2 = time.clock()
+        t2 = time.perf_counter()
         update_duration = t2 - t0
         mb_preparation_duration = t1 - t0
         optimizer_update_cycle_duration = t2 - t1
@@ -382,13 +410,13 @@ class Updater(chainer.training.StandardUpdater):
                                  "mb_preparation_duration": mb_preparation_duration,
                                  "optimizer_update_cycle_duration": optimizer_update_cycle_duration})
 
-
 class ComputeLossExtension(chainer.training.Extension):
     priority = chainer.training.PRIORITY_WRITER
 
     def __init__(self, data, eos_idx,
                  mb_size, gpu, reverse_src, reverse_tgt,
-                 save_best_model_to=None, observation_name="dev_loss", config_training=None):
+                 save_best_model_to=None, observation_name="dev_loss", config_training=None,
+                 use_chainerx=False):
         self.best_loss = None
         self.save_best_model_to = save_best_model_to
         self.observation_name = observation_name
@@ -399,13 +427,15 @@ class ComputeLossExtension(chainer.training.Extension):
         self.reverse_src = reverse_src
         self.reverse_tgt = reverse_tgt
         self.config_training = config_training
+        self.use_chainerx = use_chainerx
 
     def __call__(self, trainer):
         encdec = trainer.updater.get_optimizer("main").target
         log.info("computing %s" % self.observation_name)
         dev_loss = compute_loss_all(encdec, self.data, self.eos_idx, self.mb_size,
                                     gpu=self.gpu,
-                                    reverse_src=self.reverse_src, reverse_tgt=self.reverse_tgt)
+                                    reverse_src=self.reverse_src, reverse_tgt=self.reverse_tgt,
+                                    use_chainerx=self.use_chainerx)
         log.info("%s: %f (current best: %r)" % (self.observation_name, dev_loss, self.best_loss))
         chainer.reporter.report({self.observation_name: dev_loss})
 
@@ -434,15 +464,29 @@ class ComputeLossExtension(chainer.training.Extension):
         # Make sure that best_loss is at the right location.
         # After deserialization, the best_loss is
         # instanciated on the CPU instead of the GPU.
-        if self.gpu is None:
-            pass  # best_loss should be on the cpu memory anyway
-#             if isinstance(self.best_loss, cupy.core.ndarray):
-#                 self.best_loss = cupy.asnumpy(self.best_loss)
+        if self.use_chainerx:
+            if self.gpu is None:
+                if self.best_loss is not None and not isinstance(self.best_loss, chainerx.ndarray):
+                    self.best_loss = chainerx.array(self.best_loss)
+            else:
+                if self.best_loss is not None:
+                    if isinstance(self.best_loss, chainerx.ndarray):
+                        self.best_loss = chainerx.array(self.best_loss, device="cuda:%i"%self.gpu)
+                    else:
+                        self.best_loss = chainerx.array(self.best_loss, device="cuda:%i"%self.gpu)
+
+
+            #if self.gpu is not None and self.best_loss is not None:
         else:
-            import cupy
-            if self.best_loss is not None and (isinstance(self.best_loss, numpy.ndarray) or self.best_loss.device.id != self.gpu):
-                with cupy.cuda.Device(self.gpu):
-                    self.best_loss = cupy.array(self.best_loss)
+            if self.gpu is None:
+                pass  # best_loss should be on the cpu memory anyway
+    #             if isinstance(self.best_loss, cupy.core.ndarray):
+    #                 self.best_loss = cupy.asnumpy(self.best_loss)
+            else:
+                import cupy
+                if self.best_loss is not None and (isinstance(self.best_loss, numpy.ndarray) or self.best_loss.device.id != self.gpu):
+                    with cupy.cuda.Device(self.gpu):
+                        self.best_loss = cupy.array(self.best_loss)
 
 
 class ComputeBleuExtension(chainer.training.Extension):
@@ -455,7 +499,8 @@ class ComputeBleuExtension(chainer.training.Extension):
                  nb_steps=50,
                  s_unk_tag=lambda num, utag: "S_UNK_%i" % utag,
                  t_unk_tag=lambda num, utag: "T_UNK_%i" % utag,
-                 config_training=None):
+                 config_training=None,
+                 use_chainerx = False):
         self.best_bleu = None
         self.save_best_model_to = save_best_model_to
         self.observation_name = observation_name
@@ -479,6 +524,7 @@ class ComputeBleuExtension(chainer.training.Extension):
         self.references = [y for x, y in data]
 
         self.config_training = config_training
+        self.use_chainerx = use_chainerx
 
     def __call__(self, trainer):
         encdec = trainer.updater.get_optimizer("main").target
@@ -490,7 +536,8 @@ class ComputeBleuExtension(chainer.training.Extension):
                                        control_src_fn=self.control_src_fn,
                                        src_indexer=self.src_indexer, gpu=self.gpu, nb_steps=50,
                                        reverse_src=self.reverse_src, reverse_tgt=self.reverse_tgt,
-                                       s_unk_tag=self.s_unk_tag, t_unk_tag=self.t_unk_tag)
+                                       s_unk_tag=self.s_unk_tag, t_unk_tag=self.t_unk_tag,
+                                       use_chainerx=self.use_chainerx)
         bleu = bleu_stats.bleu()
         chainer.reporter.report({self.observation_name: bleu,
                                  self.observation_name + "_details": repr(bleu)})
@@ -564,7 +611,6 @@ class TrainingLossSummaryExtension(chainer.training.Extension):
             chainer.reporter.report({"avg_update_time": avg_update_time})
             self.reset()
 
-import socket
 class SqliteLogExtension(chainer.training.Extension):
     priority = chainer.training.PRIORITY_READER
 
@@ -648,6 +694,7 @@ def train_on_data_chainer(encdec, optimizer, training_data, output_files_dict,
                           config_training,
                           stop_trigger=None,
                           test_data=None, dev_data=None, valid_data=None,
+                          use_chainerx = False
                           ):
 
     output_dir = config_training.training_management.save_prefix
@@ -701,7 +748,8 @@ def train_on_data_chainer(encdec, optimizer, training_data, output_files_dict,
                     s_unk_tag=s_unk_tag, t_unk_tag=t_unk_tag)
             else:
     
-                src_batch, tgt_batch, src_mask = make_batch_src_tgt(mb_raw, eos_idx=eos_idx, padding_idx=0, gpu=gpu, need_arg_sort=False)
+                src_batch, tgt_batch, src_mask = make_batch_src_tgt(mb_raw, eos_idx=eos_idx, padding_idx=0, gpu=gpu, need_arg_sort=False,
+                                                                    use_chainerx = use_chainerx)
         
                 sample_once(encdec, src_batch, tgt_batch, src_mask, src_indexer, tgt_indexer, eos_idx,
                             max_nb=20,
@@ -729,7 +777,7 @@ def train_on_data_chainer(encdec, optimizer, training_data, output_files_dict,
     if encdec.encdec_type() == "ff":
         def loss_func(src_seq, tgt_seq):
     
-            t0 = time.clock()
+            t0 = time.perf_counter()
             
             loss = encdec.compute_loss(src_seq, tgt_seq, reduce="no")
             total_loss = F.sum(loss)
@@ -737,7 +785,7 @@ def train_on_data_chainer(encdec, optimizer, training_data, output_files_dict,
             
             avg_loss = total_loss / total_nb_predictions
     
-            t1 = time.clock()
+            t1 = time.perf_counter()
             chainer.reporter.report({"forward_time": t1 - t0})
     
             chainer.reporter.report({"mb_loss": total_loss.data})
@@ -760,7 +808,7 @@ def train_on_data_chainer(encdec, optimizer, training_data, output_files_dict,
     else:
         def loss_func(src_batch, tgt_batch, src_mask):
     
-            t0 = time.clock()
+            t0 = time.perf_counter()
             (total_loss, total_nb_predictions), attn = encdec(src_batch, tgt_batch, src_mask, raw_loss_info=True,
                                                               noise_on_prev_word=noise_on_prev_word,
                                                               use_previous_prediction=use_previous_prediction,
@@ -769,7 +817,7 @@ def train_on_data_chainer(encdec, optimizer, training_data, output_files_dict,
                                                               temperature_for_soft_predictions=temperature_for_soft_predictions)
             avg_loss = total_loss / total_nb_predictions
     
-            t1 = time.clock()
+            t1 = time.perf_counter()
             chainer.reporter.report({"forward_time": t1 - t0})
     
             chainer.reporter.report({"mb_loss": total_loss.data})
@@ -789,14 +837,27 @@ def train_on_data_chainer(encdec, optimizer, training_data, output_files_dict,
             return avg_loss
 
         def convert_mb(mb_raw, device):
-            return make_batch_src_tgt(mb_raw, eos_idx=eos_idx, padding_idx=0, gpu=device, need_arg_sort=False)
+            return make_batch_src_tgt(mb_raw, eos_idx=eos_idx, padding_idx=0, gpu=device, need_arg_sort=False,
+                                            use_chainerx=use_chainerx)
+
+
+    if use_chainerx:
+        if gpu is None:
+            device_string = "native:0"
+        else:
+            device_string = "cuda:%i"%gpu
+    else:
+        if gpu is None:
+            device_string = "@numpy"
+        else:
+            device_string = "@cupy:%i"%gpu
 
     updater = Updater(iterator_training_data, optimizer,
                       converter=convert_mb,
                       # iterator_training_data = chainer.iterators.SerialIterator(training_data, mb_size,
                       # repeat = True,
                       # shuffle = reshuffle_every_epoch)
-                      device=gpu,
+                      device=device_string,
                       loss_func=loss_func,
                       need_to_convert_to_variables=False)
 
@@ -809,7 +870,8 @@ def train_on_data_chainer(encdec, optimizer, training_data, output_files_dict,
         dev_loss_extension = ComputeLossExtension(dev_data, eos_idx,
                                                   mb_size, gpu, reverse_src, reverse_tgt,
                                                   save_best_model_to=output_files_dict["model_best_loss"],
-                                                  observation_name="dev_loss", config_training=config_training)
+                                                  observation_name="dev_loss", config_training=config_training,
+                                                  use_chainerx=use_chainerx)
         trainer.extend(dev_loss_extension, trigger=(report_every, "iteration"))
 
         dev_bleu_extension = ComputeBleuExtension(dev_data, eos_idx, src_indexer, tgt_indexer,
@@ -817,21 +879,25 @@ def train_on_data_chainer(encdec, optimizer, training_data, output_files_dict,
                                                   output_files_dict["dev_src_output"],
                                                   mb_size, gpu, reverse_src, reverse_tgt,
                                                   save_best_model_to=output_files_dict["model_best"],
-                                                  observation_name="dev_bleu", config_training=config_training)
+                                                  observation_name="dev_bleu", config_training=config_training,
+                                                  use_chainerx=use_chainerx)
 
         trainer.extend(dev_bleu_extension, trigger=(report_every, "iteration"))
 
     if test_data is not None and not no_report_or_save:
         test_loss_extension = ComputeLossExtension(test_data, eos_idx,
                                                    mb_size, gpu, reverse_src, reverse_tgt,
-                                                   observation_name="test_loss")
+                                                   observation_name="test_loss",
+                                                   use_chainerx=use_chainerx)
+
         trainer.extend(test_loss_extension, trigger=(report_every, "iteration"))
 
         test_bleu_extension = ComputeBleuExtension(test_data, eos_idx, src_indexer, tgt_indexer,
                                                    output_files_dict["test_translation_output"],
                                                    output_files_dict["test_src_output"],
                                                    mb_size, gpu, reverse_src, reverse_tgt,
-                                                   observation_name="test_bleu")
+                                                   observation_name="test_bleu",
+                                                   use_chainerx=use_chainerx)
 
         trainer.extend(test_bleu_extension, trigger=(report_every, "iteration"))
 

@@ -356,7 +356,7 @@ def do_train(config_training):
     if len(already_existing_files) > 0:
         print("Warning: existing files are going to be replaced / updated: ", already_existing_files)
         if not config_training.training_management.force_overwrite:
-            raw_input("Press Enter to Continue")
+            input("Press Enter to Continue")
 
     save_train_config_fn = output_files_dict["train_config"]
     log.info("Saving training config to %s" % save_train_config_fn)
@@ -465,8 +465,14 @@ def do_train(config_training):
 #                 dicseri.load(encdec)
                 
     gpu = config_training.training_management.gpu
-    if gpu is not None:
-        encdec = encdec.to_gpu(gpu)
+    if config_training.training_management.use_chainerx:
+        if gpu is not None:
+            encdec = encdec.to_device("cuda:%i"%gpu)
+        else:
+            encdec = encdec.to_device("native:0")
+    else:
+        if gpu is not None:
+            encdec = encdec.to_gpu(gpu)
 
     if config_training.training.optimizer == "adadelta":
         optimizer = optimizers.AdaDelta()
@@ -493,15 +499,15 @@ def do_train(config_training):
     else:
         raise NotImplemented
 
-    with cuda.get_device(gpu):
+    with cuda.get_device_from_id(gpu):
         optimizer.setup(encdec)
 
     if config_training.training.l2_gradient_clipping is not None and config_training.training.l2_gradient_clipping > 0:
-        optimizer.add_hook(chainer.optimizer.GradientClipping(
+        optimizer.add_hook(chainer.optimizer_hooks.GradientClipping(
             config_training.training.l2_gradient_clipping))
 
     if config_training.training.hard_gradient_clipping is not None and config_training.training.hard_gradient_clipping > 0:
-        optimizer.add_hook(chainer.optimizer.GradientHardClipping(
+        optimizer.add_hook(chainer.optimizer_hooks.GradientHardClipping(
             *config_training.training.hard_gradient_clipping))
 
     if config_training.training.weight_decay is not None:
@@ -510,7 +516,7 @@ def do_train(config_training):
                 config_training.training.weight_decay))
 
     if config_training.training_management.load_optimizer_state is not None:
-        with cuda.get_device(gpu):
+        with cuda.get_device_from_id(gpu):
             log.info("loading optimizer parameters from %s", config_training.training_management.load_optimizer_state)
             serializers.load_npz(config_training.training_management.load_optimizer_state, optimizer)
 
@@ -524,7 +530,7 @@ def do_train(config_training):
             yield
 
     from . import training_chainer
-    with cuda.get_device(gpu):
+    with cuda.get_device_from_id(gpu):
         with timer_hook() as timer_infos:
 
             if config_training.training_management.max_nb_iters is not None:
@@ -543,7 +549,8 @@ def do_train(config_training):
                                                    src_indexer, tgt_indexer, eos_idx=eos_idx,
                                                    config_training=config_training,
                                                    stop_trigger=stop_trigger,
-                                                   test_data=test_data, dev_data=dev_data, valid_data=valid_data
+                                                   test_data=test_data, dev_data=dev_data, valid_data=valid_data,
+                                                   use_chainerx=config_training.training_management.use_chainerx
                                                    )
 
 
