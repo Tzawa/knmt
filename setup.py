@@ -33,6 +33,7 @@ def write_build_info():
     try:
         git_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'],
                                            cwd=module_dir,
+                                           encoding="utf8",
                                            stderr=subprocess.STDOUT).strip()
     except BaseException:
         git_hash = "**Could not retrieve git-hash"
@@ -55,6 +56,7 @@ def write_build_info():
     try:
         git_diff = subprocess.check_output(['git', 'diff'],
                                            cwd=module_dir,
+                                           encoding="utf8",
                                            stderr=subprocess.STDOUT)
     except BaseException:
         git_diff = '**Could not retrieve git-diff**'

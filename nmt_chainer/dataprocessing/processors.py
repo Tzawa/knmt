@@ -1,3 +1,4 @@
+from __future__ import absolute_import, division, print_function, unicode_literals
 import nmt_chainer.external_libs.bpe.learn_bpe as learn_bpe
 import nmt_chainer.external_libs.bpe.apply_bpe as apply_bpe
 import collections
@@ -8,10 +9,12 @@ from nmt_chainer.dataprocessing.indexer import Indexer
 
 import logging
 import json
+import io 
 import codecs
 import itertools
 import re
 import copy
+import six
 
 logging.basicConfig()
 log = logging.getLogger("rnns:processors")
@@ -25,7 +28,7 @@ def build_index_from_iterable(iterable, voc_limit=None):
             counts[w] += 1
 
     sorted_counts = sorted(
-        counts.items(), key=operator.itemgetter(1), reverse=True)
+        six.iteritems(counts), key=operator.itemgetter(1), reverse=True)
 
     res = Indexer()
 
@@ -46,10 +49,11 @@ class ApplyToMultiIterator(object):
     def __iter__(self):
         return ApplyToMultiIterator(self.iterable, self.function, can_iter=True)
 
-    def next(self):
+    def __next__(self):
         elem = self.iterator.next()
         return self.function(elem)
 
+    next = __next__
 
 class ApplyToMultiIteratorPair(object):
     def __init__(self, iterable1, iterable2, function, can_iter=False):
@@ -64,11 +68,12 @@ class ApplyToMultiIteratorPair(object):
     def __iter__(self):
         return ApplyToMultiIteratorPair(self.iterable1, self.iterable2, self.function, can_iter=True)
 
-    def next(self):
+    def __next__(self):
         elem1 = self.iterator1.next()
         elem2 = self.iterator2.next()
         return self.function(elem1, elem2)
 
+    next = __next__
 
 class FileMultiIterator(object):
     def __init__(self, filename, max_nb_ex=None, can_iter=False):
@@ -76,10 +81,10 @@ class FileMultiIterator(object):
         self.max_nb_ex = max_nb_ex
 
         if can_iter:
-            self.f = codecs.open(self.filename, encoding="utf8")
+            self.f = io.open(self.filename, 'rt', encoding="utf8")
             self.nb_line_read = 0
 
-    def next(self):
+    def __next__(self):
         if self.max_nb_ex is not None and self.nb_line_read >= self.max_nb_ex:
             raise StopIteration()
         line = self.f.readline()
@@ -89,6 +94,8 @@ class FileMultiIterator(object):
             #             print self.nb_line_read, line.strip()
             self.nb_line_read += 1
             return line.strip()
+
+    next = __next__
 
     def __iter__(self):
         return FileMultiIterator(self.filename, max_nb_ex=self.max_nb_ex, can_iter=True)
@@ -423,13 +430,13 @@ class BPEProcessing(MonoProcessor):
 
     def load_bpe(self):
         log.info("loading BPE data from %s", self.bpe_data_file)
-        with codecs.open(self.bpe_data_file, "r", encoding="utf8") as codes:
+        with io.open(self.bpe_data_file, "rt", encoding="utf8") as codes:
             self.bpe = apply_bpe.BPE(codes, self.separator)
         self.is_initialized_ = True
 
     def initialize(self, iterable):
         log.info("Creating BPE data and saving it to %s", self.bpe_data_file)
-        with codecs.open(self.bpe_data_file, "w", encoding="utf8") as output:
+        with io.open(self.bpe_data_file, "wt", encoding="utf8") as output:
             learn_bpe.learn_bpe_from_sentence_iterable(iterable, output=output,
                                                        symbols=self.symbols,
                                                        min_frequency=self.min_frequency,
@@ -993,7 +1000,7 @@ class IndexingPrePostProcessor(IndexingPrePostProcessorBase):
 
 
 def izip_must_equal(it1, it2):
-    for s1, s2 in itertools.izip_longest(it1, it2, fillvalue=None):
+    for s1, s2 in six.moves.zip_longest(it1, it2, fillvalue=None):
         if s1 is None or s2 is None:
             raise ValueError("iterators have different sizes")
         yield s1, s2
@@ -1021,7 +1028,7 @@ def build_dataset_pp(src_fn, tgt_fn, bi_idx, max_nb_ex=None):
 #
 #     print tgt_pp
 
-    print bi_idx
+    print(bi_idx)
 
     stats_src, stats_tgt = bi_idx.make_new_stat()
 
@@ -1040,7 +1047,7 @@ def build_dataset_pp(src_fn, tgt_fn, bi_idx, max_nb_ex=None):
 def build_dataset_one_side_pp(src_fn, src_pp, max_nb_ex=None):
 
     src = FileMultiIterator(src_fn, max_nb_ex=max_nb_ex)
-    print src_pp
+    print(src_pp)
     if not src_pp.is_initialized():
         log.info("building src_dic")
         src_pp.initialize(src)

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from __future__ import absolute_import, division, print_function, unicode_literals
 """eval.py: Use a RNNSearch Model"""
 __author__ = "Fabien Cromieres"
 __license__ = "undecided"
@@ -35,7 +36,7 @@ import logging
 import codecs
 # import h5py
 import bokeh.embed
-
+import six
 
 logging.basicConfig()
 log = logging.getLogger("rnns:eval")
@@ -50,11 +51,11 @@ class AttentionVisualizer(object):
         from nmt_chainer.utilities import visualisation
         alignment = np.zeros((len(src_w) + 1, len(tgt_w)))
         sum_al = [0] * len(tgt_w)
-        for i in xrange(len(src_w)):
-            for j in xrange(len(tgt_w)):
+        for i in six.moves.range(len(src_w)):
+            for j in six.moves.range(len(tgt_w)):
                 alignment[i, j] = attn[j][i]
                 sum_al[j] += alignment[i, j]
-        for j in xrange(len(tgt_w)):
+        for j in six.moves.range(len(tgt_w)):
             alignment[len(src_w), j] = sum_al[j]
 
         src = src_w
@@ -76,7 +77,7 @@ class AttentionVisualizer(object):
             script_output_fn, div_output_fn = output_file
             script, div = bokeh.embed.components(p_all)
             with open(script_output_fn, 'w') as f:
-                f.write(script.encode('utf-8'))
+                f.write(script)
             with open(div_output_fn, 'w') as f:
                 f.write(div)
         else:
@@ -157,9 +158,9 @@ def beam_search_all(gpu, encdec, eos_idx, src_data, beam_width, beam_pruning_mar
             for trans in translations:
                 (t, score, attn) = trans
                 if num_t % 200 == 0:
-                    print >>sys.stderr, num_t,
+                    sys.stderr.write(str(num_t))
                 elif num_t % 40 == 0:
-                    print >>sys.stderr, "*",
+                    sys.stderr.write("*")
 #                 t, score = bests[1]
 #                 ct = convert_idx_to_string(t, tgt_voc + ["#T_UNK#"])
 #                 ct = convert_idx_to_string_with_attn(t, tgt_voc, attn, unk_idx = len(tgt_voc))
@@ -196,7 +197,7 @@ def beam_search_all(gpu, encdec, eos_idx, src_data, beam_width, beam_pruning_mar
 
             yield res_trans
 
-        print >>sys.stderr
+        sys.stderr.write("\n")
 
 
 def translate_to_file_with_beam_search(dest_fn, gpu, encdec, eos_idx, src_data, beam_width, beam_pruning_margin, beam_score_coverage_penalty, beam_score_coverage_penalty_strength, nb_steps,
@@ -422,9 +423,9 @@ def do_eval(config_eval):
 
     time_start = time.clock()
 
-    encdec_list, eos_idx, src_indexer, tgt_indexer, reverse_encdec, model_infos_list = create_encdec(config_eval)
-
     if config_eval.process.server is None:
+        encdec_list, eos_idx, src_indexer, tgt_indexer, reverse_encdec, model_infos_list = create_encdec(config_eval)
+
         eval_dir_placeholder = "@eval@/"
         if dest_fn.startswith(eval_dir_placeholder):
             if config_eval.trained_model is not None:
@@ -456,12 +457,19 @@ def do_eval(config_eval):
                                                            max_nb_ex=max_nb_ex)
         log.info("src data stats:\n%s", stats_src_pp.make_report())
 
+        translation_infos = OrderedNamespace()
+        translation_infos["src"] = src_fn
+        translation_infos["tgt"] = tgt_fn
+        translation_infos["ref"] = ref
+
+        for num_model, model_infos in enumerate(model_infos_list):
+            translation_infos["model%i" % num_model] = model_infos
+
     if dest_fn is not None:
         save_eval_config_fn = dest_fn + ".eval.init.config.json"
         log.info("Saving initial eval config to %s" % save_eval_config_fn)
         config_eval.save_to(save_eval_config_fn)
 
-    translation_infos = OrderedNamespace()
 #     log.info("%i sentences loaded" % make_data_infos.nb_ex)
 #     log.info("#tokens src: %i   of which %i (%f%%) are unknown"%(make_data_infos.total_token,
 #                                                                  make_data_infos.total_count_unk,
@@ -481,13 +489,6 @@ def do_eval(config_eval):
 #                                                                     make_data_infos.total_token))
 
 #     translations = greedy_batch_translate(encdec, eos_idx, src_data, batch_size = mb_size, gpu = args.gpu)
-
-    translation_infos["src"] = src_fn
-    translation_infos["tgt"] = tgt_fn
-    translation_infos["ref"] = ref
-
-    for num_model, model_infos in enumerate(model_infos_list):
-        translation_infos["model%i" % num_model] = model_infos
 
     time_all_loaded = time.clock()
 
@@ -541,11 +542,11 @@ def do_eval(config_eval):
             if mode == "eval_bleu":
                 if ref is not None:
                     bc = bleu_computer.get_bc_from_files(ref, dest_fn)
-                    print "bleu before unk replace:", bc
+                    print("bleu before unk replace:", bc)
                     translation_infos["bleu"] = bc.bleu()
                     translation_infos["bleu_infos"] = str(bc)
                 else:
-                    print "bleu before unk replace: No Ref Provided"
+                    print("bleu before unk replace: No Ref Provided")
 
                 from nmt_chainer.utilities import replace_tgt_unk
                 replace_tgt_unk.replace_unk(dest_fn, src_fn, dest_fn + ".unk_replaced", dic, remove_unk,
@@ -555,11 +556,11 @@ def do_eval(config_eval):
 
                 if ref is not None:
                     bc = bleu_computer.get_bc_from_files(ref, dest_fn + ".unk_replaced")
-                    print "bleu after unk replace:", bc
+                    print("bleu after unk replace:", bc)
                     translation_infos["post_unk_bleu"] = bc.bleu()
                     translation_infos["post_unk_bleu_infos"] = str(bc)
                 else:
-                    print "bleu before unk replace: No Ref Provided"
+                    print("bleu before unk replace: No Ref Provided")
 
     elif mode == "translate_attn":
         log.info("writing translation + attention as html to %s" % dest_fn)
@@ -573,7 +574,7 @@ def do_eval(config_eval):
         assert len(translations) == len(src_data)
         assert len(attn_all) == len(src_data)
         attn_vis = AttentionVisualizer()
-        for num_t in xrange(len(src_data)):
+        for num_t in six.moves.range(len(src_data)):
             src_idx_list = src_data[num_t]
             tgt_idx_list = translations[num_t][:-1]
             attn = attn_all[num_t]
@@ -583,7 +584,7 @@ def do_eval(config_eval):
             tgt_w = tgt_indexer.deconvert_swallow(tgt_idx_list, unk_tag="#T_UNK#")
 #             src_w = [src_voc_with_unk[idx] for idx in src_idx_list] + ["SUM_ATTN"]
 #             tgt_w = [tgt_voc_with_unk[idx] for idx in tgt_idx_list]
-#             for j in xrange(len(tgt_idx_list)):
+#             for j in six.moves.range(len(tgt_idx_list)):
 #                 tgt_idx_list.append(tgt_voc_with_unk[t_and_attn[j][0]])
 #
     #         print [src_voc_with_unk[idx] for idx in src_idx_list], tgt_idx_list
@@ -606,7 +607,7 @@ def do_eval(config_eval):
 
         assert len(attn_all) == len(src_data)
         plots_list = []
-        for num_t in xrange(len(src_data)):
+        for num_t in six.moves.range(len(src_data)):
             src_idx_list = src_data[num_t]
             tgt_idx_list = tgt_data[num_t]
             attn = attn_all[num_t]
@@ -614,18 +615,18 @@ def do_eval(config_eval):
 
             alignment = np.zeros((len(src_idx_list) + 1, len(tgt_idx_list)))
             sum_al = [0] * len(tgt_idx_list)
-            for i in xrange(len(src_idx_list)):
-                for j in xrange(len(tgt_idx_list)):
+            for i in six.moves.range(len(src_idx_list)):
+                for j in six.moves.range(len(tgt_idx_list)):
                     alignment[i, j] = attn[j][i]
                     sum_al[j] += alignment[i, j]
-            for j in xrange(len(tgt_idx_list)):
+            for j in six.moves.range(len(tgt_idx_list)):
                 alignment[len(src_idx_list), j] = sum_al[j]
 
             src_w = src_indexer.deconvert_swallow(src_idx_list, unk_tag="#S_UNK#") + ["SUM_ATTN"]
             tgt_w = tgt_indexer.deconvert_swallow(tgt_idx_list, unk_tag="#T_UNK#")
 #             src_w = [src_voc_with_unk[idx] for idx in src_idx_list] + ["SUM_ATTN"]
 #             tgt_w = [tgt_voc_with_unk[idx] for idx in tgt_idx_list]
-#             for j in xrange(len(tgt_idx_list)):
+#             for j in six.moves.range(len(tgt_idx_list)):
 #                 tgt_idx_list.append(tgt_voc_with_unk[t_and_attn[j][0]])
 #
     #         print [src_voc_with_unk[idx] for idx in src_idx_list], tgt_idx_list
@@ -675,37 +676,37 @@ def do_eval(config_eval):
         log.info("starting scoring")
         from nmt_chainer.utilities import utils
         res = []
-        for num in xrange(len(nbest_converted)):
+        for num in six.moves.range(len(nbest_converted)):
             if num % 200 == 0:
-                print >>sys.stderr, num,
+                sys.stderr.write(str(num))
             elif num % 50 == 0:
-                print >>sys.stderr, "*",
+                sys.stderr.write("*")
 
             res.append([])
             src, tgt_list = src_data[num], nbest_converted[num]
-            src_batch, src_mask = utils.make_batch_src([src], gpu=gpu, volatile="on")
+            src_batch, src_mask = utils.make_batch_src([src], gpu=gpu)
 
             assert len(encdec_list) == 1
             scorer = encdec_list[0].nbest_scorer(src_batch, src_mask)
 
             nb_batches = (len(tgt_list) + mb_size - 1) / mb_size
-            for num_batch in xrange(nb_batches):
+            for num_batch in six.moves.range(nb_batches):
                 tgt_batch, arg_sort = utils.make_batch_tgt(tgt_list[num_batch * nb_batches: (num_batch + 1) * nb_batches],
-                                                           eos_idx=eos_idx, gpu=gpu, volatile="on", need_arg_sort=True)
+                                                           eos_idx=eos_idx, gpu=gpu, need_arg_sort=True)
                 scores, attn = scorer(tgt_batch)
                 scores, _ = scores
                 scores = scores.data
 
                 assert len(arg_sort) == len(scores)
                 de_sorted_scores = [None] * len(scores)
-                for xpos in xrange(len(arg_sort)):
+                for xpos in six.moves.range(len(arg_sort)):
                     original_pos = arg_sort[xpos]
                     de_sorted_scores[original_pos] = scores[xpos]
                 res[-1] += de_sorted_scores
-        print >>sys.stderr
+        sys.stderr.write("\n")
         log.info("writing scores to %s" % dest_fn)
         out = codecs.open(dest_fn, "w", encoding="utf8")
-        for num in xrange(len(res)):
+        for num in six.moves.range(len(res)):
             for score in res[num]:
                 out.write("%i %f\n" % (num, score))
 

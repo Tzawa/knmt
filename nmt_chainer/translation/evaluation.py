@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """eval.py: Use a RNNSearch Model"""
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 __author__ = "Fabien Cromieres"
 __license__ = "undecided"
@@ -13,8 +14,9 @@ import numpy as np
 import math
 import codecs
 import operator
-import beam_search
+from . import beam_search
 # import h5py
+import six
 
 logging.basicConfig()
 log = logging.getLogger("rnns:evaluation")
@@ -60,7 +62,7 @@ def translate_to_file(encdec, eos_idx, test_src_data, mb_size, tgt_indexer,
 
 def compute_loss_all(encdec, test_data, eos_idx, mb_size, gpu=None, reverse_src=False, reverse_tgt=False):
     mb_provider_test = minibatch_provider(test_data, eos_idx, mb_size, nb_mb_for_sorting=-1, loop=False,
-                                          gpu=gpu, volatile="on",
+                                          gpu=gpu,
                                           reverse_src=reverse_src, reverse_tgt=reverse_tgt)
     test_loss = 0
     test_nb_predictions = 0
@@ -87,7 +89,7 @@ def greedy_batch_translate(encdec, eos_idx, src_data, batch_size=80, gpu=None, g
                 current_batch_raw_data_new.append(src_side[::-1])
             current_batch_raw_data = current_batch_raw_data_new
 
-        src_batch, src_mask = make_batch_src(current_batch_raw_data, gpu=gpu, volatile="on")
+        src_batch, src_mask = make_batch_src(current_batch_raw_data, gpu=gpu)
         sample_greedy, score, attn_list = encdec(src_batch, nb_steps, src_mask, use_best_for_sample=True,
                                                  keep_attn_values=get_attention, mode="test")
         deb = de_batch(sample_greedy, mask=None, eos_idx=eos_idx, is_variable=False)
@@ -125,7 +127,7 @@ def reverse_rescore(encdec, src_batch, src_mask, eos_idx, translations, gpu=None
 
     scorer = encdec.nbest_scorer(src_batch, src_mask)
     tgt_batch, arg_sort = utils.make_batch_tgt(reversed_translations,
-                                               eos_idx=eos_idx, gpu=gpu, volatile="on", need_arg_sort=True)
+                                               eos_idx=eos_idx, gpu=gpu, need_arg_sort=True)
 
     scores, attn = scorer(tgt_batch)
     scores, _ = scores
@@ -133,7 +135,7 @@ def reverse_rescore(encdec, src_batch, src_mask, eos_idx, translations, gpu=None
 
     assert len(arg_sort) == len(scores)
     de_sorted_scores = [None] * len(scores)
-    for xpos in xrange(len(arg_sort)):
+    for xpos in six.moves.range(len(arg_sort)):
         original_pos = arg_sort[xpos]
         de_sorted_scores[original_pos] = scores[xpos]
     return de_sorted_scores
@@ -149,7 +151,7 @@ def beam_search_translate(encdec, eos_idx, src_data, beam_width=20, beam_pruning
                           nbest=None):
     nb_ex = len(src_data)
     for num_ex in range(nb_ex):
-        src_batch, src_mask = make_batch_src([src_data[num_ex]], gpu=gpu, volatile="on")
+        src_batch, src_mask = make_batch_src([src_data[num_ex]], gpu=gpu)
         assert len(src_mask) == 0
         if nb_steps_ratio is not None:
             nb_steps = int(len(src_data[num_ex]) * nb_steps_ratio) + 1
@@ -188,7 +190,7 @@ def beam_search_translate(encdec, eos_idx, src_data, beam_width=20, beam_pruning
             reverse_scores = reverse_rescore(
                 reverse_encdec, src_batch, src_mask, eos_idx, [
                     t[0] for t in translations], gpu)
-            for num_t in xrange(len(translations)):
+            for num_t in six.moves.range(len(translations)):
                 tr, sc, attn = translations[num_t]
                 rescored_translations.append(
                     (tr, sc + reverse_scores[num_t], attn))
@@ -217,9 +219,9 @@ def beam_search_translate(encdec, eos_idx, src_data, beam_width=20, beam_pruning
                     coverage_penalty = post_score_coverage_penalty_strength * xp.sum(log_of_min_of_sum_over_j)
                     # log.info("cp={0}".format(coverage_penalty))
                     # cp = 0
-                    # for i in xrange(len(src_data[num_ex])):
+                    # for i in six.moves.range(len(src_data[num_ex])):
                     #    attn_sum = 0
-                    #    for j in xrange(len(x[0])):
+                    #    for j in six.moves.range(len(x[0])):
                     #        attn_sum += x[2][j][i]
                     #    #log.info("attn_sum={0}".format(attn_sum))
                     #    #log.info("min={0}".format(min(attn_sum, 1.0)))
@@ -256,13 +258,13 @@ def batch_align(encdec, eos_idx, src_tgt_data, batch_size=80, gpu=None):
         current_batch_raw_data = src_tgt_data[i * batch_size: (i + 1) * batch_size]
 #         print current_batch_raw_data
         src_batch, tgt_batch, src_mask, arg_sort = make_batch_src_tgt(
-            current_batch_raw_data, eos_idx=eos_idx, gpu=gpu, volatile="on", need_arg_sort=True)
+            current_batch_raw_data, eos_idx=eos_idx, gpu=gpu, need_arg_sort=True)
         loss, attn_list = encdec(src_batch, tgt_batch, src_mask, keep_attn_values=True)
         deb_attn = de_batch(attn_list, mask=None, eos_idx=None, is_variable=True, raw=True)
 
         assert len(arg_sort) == len(deb_attn)
         de_sorted_attn = [None] * len(deb_attn)
-        for xpos in xrange(len(arg_sort)):
+        for xpos in six.moves.range(len(arg_sort)):
             original_pos = arg_sort[xpos]
             de_sorted_attn[original_pos] = deb_attn[xpos]
 
@@ -300,7 +302,7 @@ def batch_align(encdec, eos_idx, src_tgt_data, batch_size=80, gpu=None):
 
 def sample_once(encdec, src_batch, tgt_batch, src_mask, src_indexer, tgt_indexer, eos_idx, max_nb=None,
                 s_unk_tag="#S_UNK#", t_unk_tag="#T_UNK#"):
-    print "sample"
+    print("sample")
     sample_greedy, score, attn_list = encdec(src_batch, 50, src_mask, use_best_for_sample=True, need_score=True,
                                              mode="test")
 
@@ -317,7 +319,7 @@ def sample_once(encdec, src_batch, tgt_batch, src_mask, src_indexer, tgt_indexer
                                                            mode="test")
     debatched_sample_random = de_batch(sample_random, eos_idx=eos_idx)
 
-    for sent_num in xrange(len(debatched_src)):
+    for sent_num in six.moves.range(len(debatched_src)):
         if max_nb is not None and sent_num > max_nb:
             break
         src_idx_seq = debatched_src[sent_num]
@@ -325,13 +327,13 @@ def sample_once(encdec, src_batch, tgt_batch, src_mask, src_indexer, tgt_indexer
         sample_idx_seq = debatched_sample[sent_num]
         sample_random_idx_seq = debatched_sample_random[sent_num]
 
-        print "sent num", sent_num
+        print("sent num", sent_num)
 
         for name, seq, unk_tag, indexer, this_eos_idx in zip("src tgt sample sample_random".split(" "),
                                                              [src_idx_seq, tgt_idx_seq, sample_idx_seq, sample_random_idx_seq],
                                                              [s_unk_tag, t_unk_tag, t_unk_tag, t_unk_tag],
                                                              [src_indexer, tgt_indexer, tgt_indexer, tgt_indexer],
                                                              [None, eos_idx, eos_idx, eos_idx]):
-            print name, "idx:", seq
-            print name, "raw:", " ".join(indexer.deconvert_swallow(seq, unk_tag=unk_tag, eos_idx=this_eos_idx)).encode('utf-8')
-            print name, "postp:", indexer.deconvert(seq, unk_tag=unk_tag, eos_idx=this_eos_idx).encode('utf-8')
+            print(name, "idx:", seq)
+            print(name, "raw:", " ".join(indexer.deconvert_swallow(seq, unk_tag=unk_tag, eos_idx=this_eos_idx)).encode('utf-8'))
+            print(name, "postp:", indexer.deconvert(seq, unk_tag=unk_tag, eos_idx=this_eos_idx).encode('utf-8'))

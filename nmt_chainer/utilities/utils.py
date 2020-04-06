@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from __future__ import absolute_import, division, print_function, unicode_literals
 """utils.py: Various utilitity functions for RNNSearch"""
 __author__ = "Fabien Cromieres"
 __license__ = "undecided"
@@ -12,6 +13,7 @@ import numpy as np
 import chainer
 from chainer import Variable, cuda
 import random
+import six
 
 logging.basicConfig()
 log = logging.getLogger("rnns:utils")
@@ -27,17 +29,17 @@ def ensure_path(path):
             raise
 
 
-def make_batch_src(src_data, padding_idx=0, gpu=None, volatile="off"):
+def make_batch_src(src_data, padding_idx=0, gpu=None):
     max_src_size = max(len(x) for x in src_data)
     min_src_size = min(len(x) for x in src_data)
     mb_size = len(src_data)
 
-    src_batch = [np.empty((mb_size,), dtype=np.int32) for _ in xrange(max_src_size)]
-    src_mask = [np.empty((mb_size,), dtype=np.bool) for _ in xrange(max_src_size - min_src_size)]
+    src_batch = [np.empty((mb_size,), dtype=np.int32) for _ in six.moves.range(max_src_size)]
+    src_mask = [np.empty((mb_size,), dtype=np.bool) for _ in six.moves.range(max_src_size - min_src_size)]
 
-    for num_ex in xrange(mb_size):
+    for num_ex in six.moves.range(mb_size):
         this_src_len = len(src_data[num_ex])
-        for i in xrange(max_src_size):
+        for i in six.moves.range(max_src_size):
             if i < this_src_len:
                 src_batch[i][num_ex] = src_data[num_ex][i]
                 if i >= min_src_size:
@@ -48,13 +50,13 @@ def make_batch_src(src_data, padding_idx=0, gpu=None, volatile="off"):
                 src_mask[i - min_src_size][num_ex] = False
 
     if gpu is not None:
-        return ([Variable(cuda.to_gpu(x, gpu), volatile=volatile) for x in src_batch],
+        return ([Variable(cuda.to_gpu(x, gpu)) for x in src_batch],
                 [cuda.to_gpu(x, gpu) for x in src_mask])
     else:
-        return [Variable(x, volatile=volatile) for x in src_batch], src_mask
+        return [Variable(x) for x in src_batch], src_mask
 
 
-def make_batch_src_tgt(training_data, eos_idx=1, padding_idx=0, gpu=None, volatile="off", need_arg_sort=False):
+def make_batch_src_tgt(training_data, eos_idx=1, padding_idx=0, gpu=None, need_arg_sort=False):
     if need_arg_sort:
         training_data_with_argsort = zip(training_data, range(len(training_data)))
         training_data_with_argsort.sort(key=lambda x: len(x[0][1]), reverse=True)
@@ -66,11 +68,11 @@ def make_batch_src_tgt(training_data, eos_idx=1, padding_idx=0, gpu=None, volati
     mb_size = len(training_data)
 
     src_batch, src_mask = make_batch_src(
-        [x for x, y in training_data], padding_idx=padding_idx, gpu=gpu, volatile=volatile)
+        [x for x, y in training_data], padding_idx=padding_idx, gpu=gpu)
 
     lengths_list = []
     lowest_non_finished = mb_size - 1
-    for pos in xrange(max_tgt_size + 1):
+    for pos in six.moves.range(max_tgt_size + 1):
         while pos > len(training_data[lowest_non_finished][1]):
             lowest_non_finished -= 1
             assert lowest_non_finished >= 0
@@ -80,11 +82,11 @@ def make_batch_src_tgt(training_data, eos_idx=1, padding_idx=0, gpu=None, volati
         lengths_list.append(mb_length_at_this_pos)
 
     tgt_batch = []
-    for i in xrange(max_tgt_size + 1):
+    for i in six.moves.range(max_tgt_size + 1):
         current_mb_size = lengths_list[i]
         assert current_mb_size > 0
         tgt_batch.append(np.empty((current_mb_size,), dtype=np.int32))
-        for num_ex in xrange(current_mb_size):
+        for num_ex in six.moves.range(current_mb_size):
             assert len(training_data[num_ex][1]) >= i
             if len(training_data[num_ex][1]) == i:
                 tgt_batch[-1][num_ex] = eos_idx
@@ -92,9 +94,9 @@ def make_batch_src_tgt(training_data, eos_idx=1, padding_idx=0, gpu=None, volati
                 tgt_batch[-1][num_ex] = training_data[num_ex][1][i]
 
     if gpu is not None:
-        tgt_batch_v = [Variable(cuda.to_gpu(x, gpu), volatile=volatile) for x in tgt_batch]
+        tgt_batch_v = [Variable(cuda.to_gpu(x, gpu)) for x in tgt_batch]
     else:
-        tgt_batch_v = [Variable(x, volatile=volatile) for x in tgt_batch]
+        tgt_batch_v = [Variable(x) for x in tgt_batch]
 
     if need_arg_sort:
         return src_batch, tgt_batch_v, src_mask, argsort
@@ -102,7 +104,7 @@ def make_batch_src_tgt(training_data, eos_idx=1, padding_idx=0, gpu=None, volati
         return src_batch, tgt_batch_v, src_mask
 
 
-def make_batch_tgt(training_data, eos_idx=1, gpu=None, volatile="off", need_arg_sort=False):
+def make_batch_tgt(training_data, eos_idx=1, gpu=None, need_arg_sort=False):
     if need_arg_sort:
         training_data_with_argsort = zip(training_data, range(len(training_data)))
         training_data_with_argsort.sort(key=lambda x: len(x[0]), reverse=True)
@@ -115,7 +117,7 @@ def make_batch_tgt(training_data, eos_idx=1, gpu=None, volatile="off", need_arg_
 
     lengths_list = []
     lowest_non_finished = mb_size - 1
-    for pos in xrange(max_tgt_size + 1):
+    for pos in six.moves.range(max_tgt_size + 1):
         while pos > len(training_data[lowest_non_finished]):
             lowest_non_finished -= 1
             assert lowest_non_finished >= 0
@@ -125,11 +127,11 @@ def make_batch_tgt(training_data, eos_idx=1, gpu=None, volatile="off", need_arg_
         lengths_list.append(mb_length_at_this_pos)
 
     tgt_batch = []
-    for i in xrange(max_tgt_size + 1):
+    for i in six.moves.range(max_tgt_size + 1):
         current_mb_size = lengths_list[i]
         assert current_mb_size > 0
         tgt_batch.append(np.empty((current_mb_size,), dtype=np.int32))
-        for num_ex in xrange(current_mb_size):
+        for num_ex in six.moves.range(current_mb_size):
             assert len(training_data[num_ex]) >= i
             if len(training_data[num_ex]) == i:
                 tgt_batch[-1][num_ex] = eos_idx
@@ -137,9 +139,9 @@ def make_batch_tgt(training_data, eos_idx=1, gpu=None, volatile="off", need_arg_
                 tgt_batch[-1][num_ex] = training_data[num_ex][i]
 
     if gpu is not None:
-        tgt_batch_v = [Variable(cuda.to_gpu(x, gpu), volatile=volatile) for x in tgt_batch]
+        tgt_batch_v = [Variable(cuda.to_gpu(x, gpu)) for x in tgt_batch]
     else:
-        tgt_batch_v = [Variable(x, volatile=volatile) for x in tgt_batch]
+        tgt_batch_v = [Variable(x) for x in tgt_batch]
 
     if need_arg_sort:
         return tgt_batch_v, argsort
@@ -190,7 +192,7 @@ def batch_sort_and_split(batch, size_parts, sort_key=lambda x: len(x[1]), inplac
         batch = list(batch)
     batch.sort(key=sort_key)
     nb_mb_for_sorting = len(batch) / size_parts + (1 if len(batch) % size_parts != 0 else 0)
-    for num_batch in xrange(nb_mb_for_sorting):
+    for num_batch in six.moves.range(nb_mb_for_sorting):
         mb_raw = batch[num_batch * size_parts: (num_batch + 1) * size_parts]
         yield mb_raw
 
@@ -210,7 +212,7 @@ def mb_reverser(mb_raw, reverse_src=False, reverse_tgt=False):
 
 
 def minibatch_provider_curiculum(data, eos_idx, mb_size, nb_mb_for_sorting=1, inplace_sorting=False, gpu=None,
-                                 randomized=False, volatile="off", sort_key=lambda x: len(x[1]),
+                                 randomized=False, sort_key=lambda x: len(x[1]),
                                  reverse_src=False, reverse_tgt=False, starting_size=200
                                  ):
     current_size = starting_size
@@ -218,7 +220,7 @@ def minibatch_provider_curiculum(data, eos_idx, mb_size, nb_mb_for_sorting=1, in
         used_data = list(data[:current_size])
         random.shuffle(used_data)
         sub_mb_provider = minibatch_provider(used_data, eos_idx, mb_size, nb_mb_for_sorting, gpu=gpu, loop=False,
-                                             randomized=randomized, sort_key=sort_key, volatile=volatile,
+                                             randomized=randomized, sort_key=sort_key,
                                              inplace_sorting=inplace_sorting,
                                              reverse_src=reverse_src, reverse_tgt=reverse_tgt)
 
@@ -230,7 +232,7 @@ def minibatch_provider_curiculum(data, eos_idx, mb_size, nb_mb_for_sorting=1, in
 
 
 def minibatch_provider(data, eos_idx, mb_size, nb_mb_for_sorting=1, loop=True, inplace_sorting=False, gpu=None,
-                       randomized=False, volatile="off", sort_key=lambda x: len(x[1]),
+                       randomized=False, sort_key=lambda x: len(x[1]),
                        reverse_src=False, reverse_tgt=False, give_raw_batch=False
                        ):
     if nb_mb_for_sorting == -1:
@@ -238,7 +240,7 @@ def minibatch_provider(data, eos_idx, mb_size, nb_mb_for_sorting=1, loop=True, i
         assert not loop
         for mb_raw in batch_sort_and_split(data, mb_size, inplace=inplace_sorting, sort_key=sort_key):
             mb_raw = mb_reverser(mb_raw, reverse_src=reverse_src, reverse_tgt=reverse_tgt)
-            src_batch, tgt_batch, src_mask = make_batch_src_tgt(mb_raw, eos_idx=eos_idx, gpu=gpu, volatile=volatile)
+            src_batch, tgt_batch, src_mask = make_batch_src_tgt(mb_raw, eos_idx=eos_idx, gpu=gpu)
 
             if give_raw_batch:
                 yield src_batch, tgt_batch, src_mask, mb_raw
@@ -256,7 +258,7 @@ def minibatch_provider(data, eos_idx, mb_size, nb_mb_for_sorting=1, loop=True, i
             # ok to sort in place since minibatch_looper will return copies
             for mb_raw in batch_sort_and_split(large_batch, mb_size, inplace=True, sort_key=sort_key):
                 mb_raw = mb_reverser(mb_raw, reverse_src=reverse_src, reverse_tgt=reverse_tgt)
-                src_batch, tgt_batch, src_mask = make_batch_src_tgt(mb_raw, eos_idx=eos_idx, gpu=gpu, volatile=volatile)
+                src_batch, tgt_batch, src_mask = make_batch_src_tgt(mb_raw, eos_idx=eos_idx, gpu=gpu)
                 if give_raw_batch:
                     yield src_batch, tgt_batch, src_mask, mb_raw
                 else:
@@ -287,7 +289,7 @@ def de_batch(batch, mask=None, eos_idx=None, is_variable=False, raw=False):
     if mask is not None:
         mask_offset = len(batch) - len(mask)
         assert mask_offset >= 0
-    for sent_num in xrange(mb_size):
+    for sent_num in six.moves.range(mb_size):
         assert sent_num == len(res)
         res.append([])
         for src_pos in range(len(batch)):
@@ -316,15 +318,15 @@ def gen_ortho(shape):
 
 def ortho_init(link):
     if isinstance(link, chainer.links.Linear):
-        print "init ortho", link
+        print("init ortho", link)
         link.W.data[...] = gen_ortho(link.W.data.shape)
     elif isinstance(link, chainer.links.GRU):
-        print "init ortho", link
+        print("init ortho", link)
         for name_lin in "W_r U_r W_z U_z W U".split(" "):
-            print "case", name_lin, getattr(link, name_lin)
+            print("case", name_lin, getattr(link, name_lin))
             ortho_init(getattr(link, name_lin))
     elif isinstance(link, chainer.links.Maxout):
-        print "init ortho", link
+        print("init ortho", link)
         ortho_init(link.linear)
     else:
         raise NotImplemented
@@ -334,10 +336,10 @@ def compute_lexicon_matrix(src_batch, lexical_probability_dictionary, V_tgt):
     real_mb_size = src_batch[0].data.shape[0]
     max_source_size = len(src_batch)
     lexicon_matrix = np.zeros((real_mb_size, max_source_size, V_tgt), dtype=np.float32)
-    for src_pos in xrange(max_source_size):
+    for src_pos in six.moves.range(max_source_size):
         # TODO: check if this is too slow
         src_batch_cpu = cuda.to_cpu(src_batch[src_pos].data)
-        for num_mb in xrange(real_mb_size):
+        for num_mb in six.moves.range(real_mb_size):
             src_idx = int(src_batch_cpu[num_mb])
             if src_idx in lexical_probability_dictionary:
                 for tgt_idx, lex_prob in lexical_probability_dictionary[src_idx].iteritems(

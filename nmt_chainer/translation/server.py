@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """server.py: Process requests to RNNSearch"""
+from __future__ import absolute_import, division, print_function, unicode_literals
 __author__ = "Frederic Bergeron"
 __license__ = "undecided"
 __version__ = "1.0"
@@ -13,6 +14,7 @@ from chainer import cuda
 import logging
 import sys
 import tempfile
+import six
 
 from nmt_chainer.dataprocessing.processors import build_dataset_one_side_pp
 import nmt_chainer.translation.eval
@@ -24,7 +26,6 @@ import time
 import timeit
 import socket
 import threading
-import SocketServer
 import xml.etree.ElementTree as ET
 import re
 import subprocess
@@ -117,7 +118,7 @@ class Translator:
         return out, script, div, unk_mapping
 
 
-class RequestHandler(SocketServer.BaseRequestHandler):
+class RequestHandler(six.moves.socketserver.BaseRequestHandler):
 
     def handle(self):
         start_request = timeit.default_timer()
@@ -193,6 +194,7 @@ class RequestHandler(SocketServer.BaseRequestHandler):
                 attempt_to_relocate_unk_source = ('true' == root.get(
                     'attempt_to_relocate_unk_source', 'false'))
                 log.info("Article id: %s" % article_id)
+                in_ = ""
                 out = ""
                 graph_data = []
                 segmented_input = []
@@ -208,7 +210,7 @@ class RequestHandler(SocketServer.BaseRequestHandler):
                     log.info("cmd=%s" % cmd)
                     start_cmd = timeit.default_timer()
 
-                    parser_output = subprocess.check_output(cmd, shell=True)
+                    parser_output = subprocess.check_output(cmd, shell=True, universal_newlines=True)
 
                     log.info(
                         "Segmenter request processed in {} s.".format(
@@ -239,32 +241,34 @@ class RequestHandler(SocketServer.BaseRequestHandler):
                     # log.info("splitted_sentence=" + splitted_sentence)
 
                     log.info(timestamped_msg("Translating sentence %d" % idx))
-                    decoded_sentence = splitted_sentence.decode('utf-8')
-                    translation, script, div, unk_mapping = self.server.translator.translate(decoded_sentence,
+                    translation, script, div, unk_mapping = self.server.translator.translate(splitted_sentence,
                                                                                              beam_width, beam_pruning_margin, beam_score_coverage_penalty, beam_score_coverage_penalty_strength, nb_steps, nb_steps_ratio, remove_unk, normalize_unicode_unk, attempt_to_relocate_unk_source,
                                                                                              beam_score_length_normalization, beam_score_length_normalization_strength, post_score_length_normalization, post_score_length_normalization_strength, post_score_coverage_penalty, post_score_coverage_penalty_strength,
                                                                                              groundhog, force_finish, prob_space_combination, attn_graph_width, attn_graph_height)
+                    translation = translation.decode('utf-8')
+                    in_ += text
                     out += translation
                     segmented_input.append(splitted_sentence)
                     segmented_output.append(translation)
                     mapping.append(unk_mapping)
-                    graph_data.append(
-                        (script.encode('utf-8'), div.encode('utf-8')))
+                    graph_data.append((script, div))
 
                     # There should always be only one sentence for now. - FB
                     break
 
                 response['article_id'] = article_id
                 response['sentence_number'] = sentence_number
+                response['in_'] = in_
                 response['out'] = out
                 response['segmented_input'] = segmented_input
                 response['segmented_output'] = segmented_output
-                response['mapping'] = map(lambda x: ' '.join(x), mapping)
+                response['mapping'] = list(map(lambda x: ' '.join(x), mapping))
                 graphes = []
                 for gd in graph_data:
                     script, div = gd
                     graphes.append({'script': script, 'div': div})
                 response['attn_graphes'] = graphes
+                response['attn_graphes'] = []
             except BaseException:
                 traceback.print_exc()
                 error_lines = traceback.format_exc().splitlines()
@@ -278,10 +282,10 @@ class RequestHandler(SocketServer.BaseRequestHandler):
                 cur_thread.name))
 
         response = json.dumps(response)
-        self.request.sendall(response)
+        self.request.sendall(response.encode('utf-8'))
 
 
-class Server(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+class Server(six.moves.socketserver.ThreadingMixIn, six.moves.socketserver.TCPServer):
 
     daemon_threads = True
     allow_reuse_address = True
@@ -293,7 +297,7 @@ class Server(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
             segmenter_command,
             segmenter_format,
             translator):
-        SocketServer.TCPServer.__init__(self, server_address, handler_class)
+        six.moves.socketserver.TCPServer.__init__(self, server_address, handler_class)
         self.segmenter_command = segmenter_command
         self.segmenter_format = segmenter_format
         self.translator = translator

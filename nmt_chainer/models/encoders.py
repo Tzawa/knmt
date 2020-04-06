@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """encoders.py: Implementation of RNNSearch in Chainer"""
+from __future__ import absolute_import, division, print_function, unicode_literals
 __author__ = "Fabien Cromieres"
 __license__ = "undecided"
 __version__ = "1.0"
@@ -11,8 +12,9 @@ from chainer import cuda, Variable
 from chainer import Link, Chain, ChainList
 import chainer.functions as F
 import chainer.links as L
+import six
 
-import rnn_cells
+from . import rnn_cells
 
 from nmt_chainer.utilities.utils import ortho_init
 
@@ -75,9 +77,9 @@ class EncoderNSteps(Chain):
         de_batched_seq = []
         for num_seq in range(mb_size):
             de_batched_seq.append(self.xp.empty((seq_length[num_seq],), dtype=self.xp.int32))
-            for i in xrange(seq_length[num_seq]):
+            for i in six.moves.range(seq_length[num_seq]):
                 de_batched_seq[-1][i] = sequence[i].data[num_seq]
-            de_batched_seq[-1] = Variable(de_batched_seq[-1], volatile="auto")
+            de_batched_seq[-1] = Variable(de_batched_seq[-1])
 
         embedded_seq = []
         for elem in de_batched_seq:
@@ -94,7 +96,7 @@ class EncoderNSteps(Chain):
         assert len(backward_seq) == len(forward_seq) == mb_size
 
         res = []
-        for num_seq in xrange(mb_size):
+        for num_seq in six.moves.range(mb_size):
             assert backward_seq[num_seq].data.shape[0] == forward_seq[num_seq].data.shape[0]
             fb_concatenated = F.concat(
                 (forward_seq[num_seq], backward_seq[num_seq][::-1]), 1)
@@ -182,13 +184,13 @@ class Encoder(Chain):
             else:
                 reshaped_mask = F.broadcast_to(
                     Variable(self.xp.reshape(mask[pos - mask_offset],
-                                             (mb_size, 1)), volatile="auto"), (mb_size, self.Hi))
+                                             (mb_size, 1))), (mb_size, self.Hi))
 
                 prev_states = self.gru_b(prev_states, x, mode=mode)
                 output = prev_states[-1]
 
                 masked_prev_states = [None] * len(prev_states)
-                for num_state in xrange(len(prev_states)):
+                for num_state in six.moves.range(len(prev_states)):
                     masked_prev_states[num_state] = F.where(reshaped_mask,
                                                             prev_states[num_state], mb_initial_states_b[num_state])  # TODO: optimize?
                 prev_states = tuple(masked_prev_states)

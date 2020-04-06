@@ -1,3 +1,4 @@
+from __future__ import absolute_import, division, print_function, unicode_literals
 import os
 import os.path
 import json
@@ -15,6 +16,7 @@ from collections import defaultdict
 import codecs
 import itertools
 import cgi
+import six
 
 import logging
 logging.basicConfig()
@@ -239,7 +241,7 @@ def process_train_config(config_fn, dest_dir):
         has_graph = True
     except sqlite3.OperationalError as e:
         log.warn("could not create graph for %s" % train_prefix)
-        print e
+        print(e)
         has_graph = False
 
     f.write("<html><body>")
@@ -340,7 +342,7 @@ def do_recap(args):
 
     current_time = time.time()
     index.write("<h1>TRAIN</h1><p>")
-    for src_tgt_fn in sorted(train_urlname_list_src_tgt.keys(), key=lambda x: max(train_urlname_list_src_tgt[x][i][0] for i in xrange(len(train_urlname_list_src_tgt[x]))), reverse=True):
+    for src_tgt_fn in sorted(train_urlname_list_src_tgt.keys(), key=lambda x: max(train_urlname_list_src_tgt[x][i][0] for i in six.moves.range(len(train_urlname_list_src_tgt[x]))), reverse=True):
         urlname_list = train_urlname_list_src_tgt[src_tgt_fn]
         index.write("<h3>** src: %s | tgt: %s **</h3>" % src_tgt_fn)
         urlname_list.sort(reverse=True)

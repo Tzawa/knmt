@@ -12,7 +12,7 @@ from chainer import cuda, Variable
 from chainer import Link, Chain, ChainList
 import chainer.functions as F
 import chainer.links as L
-
+import six
 
 import logging
 logging.basicConfig()
@@ -43,7 +43,7 @@ def iterate_best_score(new_scores, beam_width):
     all_num_cases = best_idx / v_size
     all_idx_in_cases = best_idx % v_size
 
-    for num in xrange(len(best_idx)):
+    for num in six.moves.range(len(best_idx)):
         idx = best_idx[num]
         num_case = all_num_cases[num]
         idx_in_case = all_idx_in_cases[num]
@@ -53,7 +53,7 @@ def iterate_best_score(new_scores, beam_width):
 def iterate_eos_scores(new_scores, eos_idx):
     nb_cases, v_size = new_scores.shape
 
-    for num_case in xrange(nb_cases):
+    for num_case in six.moves.range(nb_cases):
         idx_in_case = eos_idx
         yield num_case, idx_in_case, cuda.to_cpu(new_scores[num_case, eos_idx])
 
@@ -106,7 +106,7 @@ def update_next_lists(num_case, idx_in_case, new_cost, eos_idx, new_state_ensemb
                                           -new_cost))
     else:
         next_states_list.append(
-            [tuple([Variable(substates.data[num_case].reshape(1, -1), volatile="auto") for substates in new_state])
+            [tuple([Variable(substates.data[num_case].reshape(1, -1)) for substates in new_state])
              for new_state in new_state_ensemble]
         )
 
@@ -186,12 +186,12 @@ def compute_next_lists(new_state_ensemble, new_scores, beam_width, beam_pruning_
         score_iterator = iterate_best_score(new_scores, beam_width)
 
     for num_case, idx_in_case, new_cost in score_iterator:
-        if len(current_translations[num_case]) > 0:
+        if len(current_translations[int(num_case)]) > 0:
             if beam_score_length_normalization == 'simple':
-                new_cost /= len(current_translations[num_case])
+                new_cost /= len(current_translations[int(num_case)])
             elif beam_score_length_normalization == 'google':
-                new_cost /= (pow((len(current_translations[num_case]) + 5), beam_score_length_normalization_strength) / pow(6, beam_score_length_normalization_strength))
-        update_next_lists(num_case, idx_in_case, new_cost, eos_idx, new_state_ensemble,
+                new_cost /= (pow((len(current_translations[int(num_case)]) + 5), beam_score_length_normalization_strength) / pow(6, beam_score_length_normalization_strength))
+        update_next_lists(int(num_case), idx_in_case, new_cost, eos_idx, new_state_ensemble,
                           finished_translations, current_translations, current_attentions,
                           next_states_list, next_words_list, next_score_list, next_normalized_score_list, next_translations_list,
                           attn_ensemble, next_attentions_list, beam_score_coverage_penalty, beam_score_coverage_penalty_strength, need_attention=need_attention)
@@ -371,7 +371,7 @@ def advance_one_step(dec_cell_ensemble, eos_idx, current_translations_states, be
     next_translations_states = (next_translations_list,
                                 xp.array(next_score_list),
                                 concatenated_next_states_list,
-                                Variable(next_words_array, volatile="auto"),
+                                Variable(next_words_array),
                                 next_attentions_list
                                 )
 
@@ -435,7 +435,7 @@ def ensemble_beam_search(model_ensemble, src_batch, src_mask, nb_steps, eos_idx,
     )
 
     # Proceed with the search
-    for num_step in xrange(nb_steps):
+    for num_step in six.moves.range(nb_steps):
         current_translations_states = advance_one_step(
             dec_cell_ensemble,
             eos_idx,
